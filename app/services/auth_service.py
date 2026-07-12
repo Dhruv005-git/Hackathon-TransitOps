@@ -11,7 +11,6 @@ Reason:
 
 from typing import Optional
 
-import streamlit as st
 from sqlalchemy.orm import joinedload
 
 from app.auth.hashing import verify_password
@@ -47,27 +46,3 @@ def login(email: str, password: str) -> Optional[dict]:
             "role_name": user.role.name,
             "role_id": user.role_id,
         }
-
-
-def set_current_user(user_data: dict) -> None:
-    """Store authenticated user in Streamlit session state."""
-    st.session_state["authenticated"] = True
-    st.session_state["user"] = user_data
-
-
-def get_current_user() -> Optional[dict]:
-    """Retrieve the currently logged-in user from session state."""
-    if st.session_state.get("authenticated"):
-        return st.session_state.get("user")
-    return None
-
-
-def logout() -> None:
-    """Clear session state to log out the user."""
-    st.session_state["authenticated"] = False
-    st.session_state["user"] = None
-
-
-def is_authenticated() -> bool:
-    """Check if a user is currently logged in."""
-    return st.session_state.get("authenticated", False)
