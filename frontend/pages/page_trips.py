@@ -1,514 +1,342 @@
 """
-frontend/pages/page_trips.py
+frontend/pages/page_trips.py — Phase 3 + RBAC enforcement
 
-Purpose:
-    Trip Dispatcher page — full Phase 3 lifecycle implementation.
-    Tab 1: Trip Dispatcher (CRUD: Create Draft, Dispatch, Complete, Cancel).
-    Tab 2: Live Dispatch Board (Kanban-style status columns).
-
-Exposes:
-    render() — called by app.py router.
+Permissions enforced:
+  Fleet Manager  → view only (no create/dispatch — operations are Dispatcher's job)
+  Dispatcher     → full workflow (create/dispatch/complete/cancel/edit draft)
+  Safety Officer → view only
+  Financial Analyst → view only
 """
-
-import datetime
-from typing import Optional
-
+from __future__ import annotations
 import streamlit as st
 import pandas as pd
+from pydantic import ValidationError
 
-from app.auth.rbac import can_edit
-from app.services.auth_service import get_current_user
+from app.constants import TripStatus
+from app.schemas.trip_schema import TripCreate, TripUpdate, TripComplete
 from app.services.trip_service import (
-    list_trips,
-    create_draft,
-    dispatch,
-    complete,
-    cancel,
-    list_available_vehicles,
-    list_available_drivers,
+    get_all_trips, get_trip_by_id, create_trip, update_trip,
+    dispatch_trip, complete_trip, cancel_trip,
+    get_trip_summary, get_available_vehicles, get_available_drivers,
 )
-from app.services.vehicle_service import list_vehicles
-from app.services.driver_service import list_drivers
-from app.constants import (
-    TripStatus,
-    VehicleStatus,
-    DriverStatus,
-    TRIP_STATUS_COLORS,
-    VEHICLE_STATUS_COLORS,
-    DRIVER_STATUS_COLORS,
-)
-from app.database.engine import get_session
-from app.models import Trip, Vehicle, Driver
+from frontend.components.auth_guard import can
+
+_KEY_EDIT     = "trip_edit_id"
+_KEY_COMPLETE = "trip_complete_id"
+_KEY_CANCEL   = "trip_cancel_id"
+
+def _init():
+    for k in [_KEY_EDIT, _KEY_COMPLETE, _KEY_CANCEL]:
+        if k not in st.session_state:
+            st.session_state[k] = None
 
 
-# ---------------------------------------------------------------------------
-# Colour helpers
-# ---------------------------------------------------------------------------
-
-def _color_status(val: str) -> str:
-    color = TRIP_STATUS_COLORS.get(val, "#9ca3af")
-    return f"color: {color}; font-weight: 600;"
-
-
-def _status_badge(status: str, colors: dict) -> str:
-    color = colors.get(status, "#6b7280")
-    return (
-        f'<span style="background:{color}22; color:{color}; '
-        f'padding:2px 10px; border-radius:12px; font-size:0.78rem; '
-        f'font-weight:600; border:1px solid {color}66;">{status}</span>'
-    )
-
-
-def _trip_badge(status: str) -> str:
-    return _status_badge(status, TRIP_STATUS_COLORS)
-
-
-# ---------------------------------------------------------------------------
-# Shared data loader
-# ---------------------------------------------------------------------------
-
-def _load_all_trips() -> tuple[list, dict, dict]:
-    """Return (trips, vehicle_map, driver_map) — all detached from session."""
-    with get_session() as session:
-        trips    = session.query(Trip).order_by(Trip.created_at.desc()).all()
-        vehicles = {v.id: v for v in session.query(Vehicle).all()}
-        drivers  = {d.id: d for d in session.query(Driver).all()}
-    return trips, vehicles, drivers
+def _kpis(s: dict):
+    cols = st.columns(6)
+    items = [
+        (s["total"],      "Total Trips",  "#3b82f6"),
+        (s["draft"],      "Draft",        "#9ca3af"),
+        (s["dispatched"], "Dispatched",   "#f59e0b"),
+        (s["completed"],  "Completed",    "#10b981"),
+        (s["cancelled"],  "Cancelled",    "#ef4444"),
+        (f"Rs.{s['revenue']:,.0f}", "Revenue", "#8b5cf6"),
+    ]
+    for col, (val, label, color) in zip(cols, items):
+        with col:
+            st.markdown(
+                f'<div style="background:#21252e;border-radius:10px;padding:14px 16px;'
+                f'border-left:4px solid {color};margin-bottom:8px;">'
+                f'<p style="margin:0;color:#9ca3af;font-size:0.75rem;text-transform:uppercase;'
+                f'letter-spacing:.05em;">{label}</p>'
+                f'<p style="margin:0;color:{color};font-size:1.5rem;font-weight:700;">{val}</p></div>',
+                unsafe_allow_html=True,
+            )
 
 
-# ---------------------------------------------------------------------------
-# Tab 1 helpers — forms
-# ---------------------------------------------------------------------------
+def _create_form():
+    st.markdown("#### 🗺️ Create New Trip")
+    avail_v = get_available_vehicles()
+    avail_d = get_available_drivers()
 
-def _metrics_row(trips: list) -> None:
-    total      = len(trips)
-    draft      = sum(1 for t in trips if t.status == TripStatus.DRAFT)
-    dispatched = sum(1 for t in trips if t.status == TripStatus.DISPATCHED)
-    completed  = sum(1 for t in trips if t.status == TripStatus.COMPLETED)
-    cancelled  = sum(1 for t in trips if t.status == TripStatus.CANCELLED)
-
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Total Trips",  total)
-    m2.metric("📝 Draft",      draft)
-    m3.metric("🚀 Dispatched", dispatched)
-    m4.metric("✅ Completed",  completed)
-    m5.metric("❌ Cancelled",  cancelled)
-
-
-def _trips_table(trips: list, vehicles: dict, drivers: dict) -> None:
-    """Render the full trips dataframe with coloured status column."""
-    if not trips:
-        st.info("No trips match your search/filter.")
+    if not avail_v:
+        st.warning("⚠️ No Available vehicles. Make a vehicle Available first.")
+        return
+    if not avail_d:
+        st.warning("⚠️ No Available drivers.")
         return
 
-    rows = []
-    for t in trips:
-        v = vehicles.get(t.vehicle_id)
-        d = drivers.get(t.driver_id)
-        rows.append({
-            "Trip Code":      t.trip_code,
-            "From → To":      f"{t.source} → {t.destination}",
-            "Vehicle":        v.registration_no if v else "-",
-            "Driver":         d.name if d else "-",
-            "Cargo (kg)":     f"{t.cargo_weight_kg:,.0f}",
-            "Distance (km)":  f"{t.planned_distance_km:,.0f}",
-            "Revenue (₹)":    f"₹{t.revenue:,.0f}",
-            "Status":         t.status,
-            "Created":        t.created_at.strftime("%d %b %Y %H:%M") if t.created_at else "-",
-        })
+    with st.form("create_trip_form", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            v_opts  = {v["label"]: v["id"] for v in avail_v}
+            v_label = st.selectbox("Vehicle *", list(v_opts.keys()))
+            source  = st.text_input("Origin *",      placeholder="e.g. Mumbai Depot")
+            dest    = st.text_input("Destination *", placeholder="e.g. Pune Warehouse")
+            cargo_w = st.number_input("Cargo Weight (kg)", min_value=0.0,
+                                      max_value=50000.0, value=0.0, step=50.0)
+        with c2:
+            d_opts  = {d["label"]: d["id"] for d in avail_d}
+            d_label = st.selectbox("Driver *", list(d_opts.keys()))
+            dist    = st.number_input("Planned Distance (km) *", min_value=1.0,
+                                      value=100.0, step=10.0)
+            revenue = st.number_input("Revenue (Rs.) *", min_value=0.0,
+                                      value=5000.0, step=500.0, format="%.0f")
+            cargo_desc = st.text_input("Cargo Description",
+                                       placeholder="e.g. Electronics")
 
-    df = pd.DataFrame(rows)
-    st.dataframe(
-        df.style.map(_color_status, subset=["Status"]),
-        use_container_width=True,
-        hide_index=True,
-    )
+        col_draft, col_dispatch = st.columns(2)
+        with col_draft:
+            save_draft = st.form_submit_button("💾 Save as Draft",
+                                               use_container_width=True)
+        with col_dispatch:
+            dispatch_now = st.form_submit_button("🚀 Create & Dispatch",
+                                                 type="primary", use_container_width=True)
 
-
-# ---------------------------------------------------------------------------
-# Form: Create Draft Trip
-# ---------------------------------------------------------------------------
-
-def _form_create_draft() -> None:
-    """Expander form for creating a new Draft trip."""
-    with st.expander("➕ Create Draft Trip", expanded=st.session_state.get("trip_create_open", False)):
-        # Fetch selectable vehicles and drivers for the form
-        available_vehicles = list_available_vehicles()
-        all_vehicles       = list_vehicles()
-        all_drivers        = list_available_drivers()
-
-        if not all_vehicles:
-            st.warning("No vehicles in the system. Add vehicles in the Fleet module first.")
+    action = "draft" if save_draft else ("dispatch" if dispatch_now else None)
+    if action:
+        chosen_d = next((d for d in avail_d if d["id"] == d_opts.get(d_label)), None)
+        if chosen_d and chosen_d.get("license_expired") and action == "dispatch":
+            st.error("🔴 Selected driver has an EXPIRED license. Cannot dispatch.")
             return
-
-        with st.form("form_create_draft_trip", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            source      = c1.text_input("Origin *", placeholder="e.g. Mumbai")
-            destination = c2.text_input("Destination *", placeholder="e.g. Pune")
-
-            # Vehicle selector — show all vehicles but flag non-available ones
-            vehicle_options = {
-                f"{v.registration_no} — {v.model_name} ({v.status}) | Cap: {v.max_capacity_kg:,.0f} kg": v
-                for v in all_vehicles
-            }
-            selected_v_label = c1.selectbox("Vehicle *", list(vehicle_options.keys()), key="create_vehicle_sel")
-            selected_v       = vehicle_options[selected_v_label]
-
-            # Driver selector — show available drivers
-            if all_drivers:
-                driver_options = {
-                    f"{d.name} — {d.license_no} ({d.license_category}) | Score: {d.safety_score:.0f}": d
-                    for d in all_drivers
-                }
-            else:
-                driver_options = {}
-
-            if driver_options:
-                selected_d_label = c2.selectbox("Driver *", list(driver_options.keys()), key="create_driver_sel")
-                selected_d       = driver_options[selected_d_label]
-            else:
-                c2.warning("No available drivers found.")
-                selected_d = None
-
-            cargo     = c1.number_input(
-                f"Cargo Weight (kg) *  [Vehicle cap: {selected_v.max_capacity_kg:,.0f} kg]",
-                min_value=0.1, value=500.0, step=50.0
+        try:
+            data  = TripCreate(
+                vehicle_id=v_opts[v_label], driver_id=d_opts[d_label],
+                source=source, destination=dest,
+                cargo_weight_kg=cargo_w, cargo_description=cargo_desc,
+                planned_distance_km=dist, revenue=revenue,
             )
-            distance  = c2.number_input("Planned Distance (km) *", min_value=1.0, value=100.0, step=10.0)
-            revenue   = c1.number_input("Expected Revenue (₹) *",  min_value=0.0, value=10000.0, step=500.0)
+            trip = create_trip(data)
+            if action == "dispatch":
+                trip = dispatch_trip(trip["id"])
+                st.success(f"🚀 Trip **{trip['trip_code']}** dispatched! "
+                           f"{trip['vehicle_reg']} + {trip['driver_name']} en route.")
+            else:
+                st.success(f"💾 Trip **{trip['trip_code']}** saved as Draft.")
+            st.rerun()
+        except ValidationError as e:
+            for err in e.errors(): st.error(f"⚠️ {err['msg']}")
+        except ValueError as e:
+            st.error(f"⚠️ {e}")
 
-            submitted = st.form_submit_button("📝 Save as Draft", use_container_width=True, type="primary")
-            if submitted:
-                if not source.strip() or not destination.strip():
-                    st.error("Origin and Destination are required.")
-                elif selected_d is None:
-                    st.error("A driver must be selected to create a trip.")
-                else:
-                    try:
-                        trip = create_draft(
-                            source=source,
-                            destination=destination,
-                            vehicle_id=selected_v.id,
-                            driver_id=selected_d.id,
-                            cargo_weight_kg=cargo,
-                            planned_distance_km=distance,
-                            revenue=revenue,
-                        )
-                        st.success(f"✅ Draft trip saved! Code: **{trip.trip_code}**")
-                        st.session_state["trip_create_open"] = False
+
+def _trip_table(trips: list[dict]):
+    if not trips:
+        st.info("No trips match the selected filter.")
+        return
+    df = pd.DataFrame([{
+        "Trip Code":  t["trip_code"],
+        "Route":      f"{t['source']} → {t['destination']}",
+        "Vehicle":    t["vehicle_reg"],
+        "Driver":     t["driver_name"],
+        "Cargo (kg)": f"{t['cargo_weight_kg']:,.0f}",
+        "Dist. (km)": f"{t['planned_distance_km']:,.0f}",
+        "Revenue":    f"Rs.{t['revenue']:,.0f}",
+        "Status":     t["status"],
+    } for t in trips])
+
+    def cs(v):
+        c = {"Draft":"color:#9ca3af;font-weight:700;","Dispatched":"color:#f59e0b;font-weight:700;",
+             "Completed":"color:#10b981;font-weight:700;","Cancelled":"color:#ef4444;font-weight:700;"}
+        return c.get(v, "")
+
+    st.dataframe(df.style.map(cs, subset=["Status"]),
+                 use_container_width=True, hide_index=True)
+
+
+def _trip_selection_card(t: dict) -> str:
+    status_cls = {
+        "Draft":      "sc-badge-blue",
+        "Dispatched": "sc-badge-yellow",
+        "Completed":  "sc-badge-green",
+        "Cancelled":  "sc-badge-red",
+    }.get(t["status"], "sc-badge-gray")
+    return f"""
+    <div class="selection-card">
+        <div class="sc-title">🗺️ {t['trip_code']}</div>
+        <span class="sc-meta"><strong>Route:</strong> {t['source']} → {t['destination']}</span>
+        <span class="sc-meta"><strong>Vehicle:</strong> {t['vehicle_reg']}</span>
+        <span class="sc-meta"><strong>Driver:</strong> {t['driver_name']}</span>
+        <span class="sc-meta"><strong>Cargo:</strong> {t['cargo_weight_kg']:,.0f} kg</span>
+        <span class="sc-meta"><strong>Revenue:</strong> Rs.{t['revenue']:,.0f}</span>
+        <span class="sc-badge {status_cls}">{t['status']}</span>
+    </div>
+    """
+
+
+def _actions_panel(trips: list[dict]):
+    """Only rendered if the user has at least one trip action permission."""
+    has_any = any(can(a) for a in [
+        "trips.dispatch", "trips.complete", "trips.cancel", "trips.edit_draft"
+    ])
+    if not has_any or not trips:
+        return
+
+    st.markdown("---")
+    st.markdown("#### 🔧 Trip Actions")
+    options    = {f"{t['trip_code']}  [{t['status']}]  {t['source']}→{t['destination']}": t
+                  for t in trips}
+    chosen_lbl = st.selectbox("Select trip:", list(options.keys()), key="trip_select")
+    t          = options[chosen_lbl]
+
+    # Selection card
+    st.markdown(_trip_selection_card(t), unsafe_allow_html=True)
+
+    # Action buttons based on status + permissions
+    active_btns = []
+    if can("trips.dispatch")   and t["status"] == TripStatus.DRAFT:      active_btns.append("dispatch")
+    if can("trips.complete")   and t["status"] == TripStatus.DISPATCHED: active_btns.append("complete")
+    if can("trips.cancel")     and t["status"] in (TripStatus.DRAFT, TripStatus.DISPATCHED): active_btns.append("cancel")
+    if can("trips.edit_draft") and t["status"] == TripStatus.DRAFT:      active_btns.append("edit")
+
+    if active_btns:
+        bcols = st.columns(len(active_btns))
+        for col, action in zip(bcols, active_btns):
+            with col:
+                if action == "dispatch":
+                    if st.button("🚀  Dispatch", use_container_width=True, type="primary",
+                                 key="trip_dispatch_btn"):
+                        try:
+                            dispatch_trip(t["id"])
+                            st.success("✅ Trip dispatched!")
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(str(e))
+                elif action == "complete":
+                    if st.button("✅  Complete", use_container_width=True, type="primary",
+                                 key="trip_complete_btn"):
+                        st.session_state[_KEY_COMPLETE] = t["id"]
+                        st.session_state[_KEY_CANCEL]   = None
                         st.rerun()
-                    except ValueError as e:
-                        st.error(str(e))
+                elif action == "cancel":
+                    if st.button("❌  Cancel Trip", use_container_width=True,
+                                 key="trip_cancel_btn"):
+                        st.session_state[_KEY_CANCEL]   = t["id"]
+                        st.session_state[_KEY_COMPLETE] = None
+                        st.rerun()
+                elif action == "edit":
+                    if st.button("✏️  Edit Draft", use_container_width=True,
+                                 key="trip_edit_btn"):
+                        st.session_state[_KEY_EDIT]    = t["id"]
+                        st.session_state[_KEY_COMPLETE]= None
+                        st.session_state[_KEY_CANCEL]  = None
+                        st.rerun()
+    elif t["status"] in (TripStatus.COMPLETED, TripStatus.CANCELLED):
+        st.info(f"This trip is **{t['status']}** — no further actions available.")
 
-
-# ---------------------------------------------------------------------------
-# Form: Dispatch Trip
-# ---------------------------------------------------------------------------
-
-def _form_dispatch(trips: list, vehicles: dict, drivers: dict) -> None:
-    """Expander form to dispatch a Draft trip."""
-    draft_trips = [t for t in trips if t.status == TripStatus.DRAFT]
-
-    with st.expander("🚀 Dispatch Trip", expanded=False):
-        if not draft_trips:
-            st.info("No Draft trips available to dispatch.")
-            return
-
-        options = {
-            f"{t.trip_code} | {t.source} → {t.destination} | "
-            f"{vehicles.get(t.vehicle_id).registration_no if vehicles.get(t.vehicle_id) else '?'} | "
-            f"{drivers.get(t.driver_id).name if drivers.get(t.driver_id) else '?'}": t
-            for t in draft_trips
-        }
-
-        with st.form("form_dispatch_trip"):
-            selected_label = st.selectbox("Select Draft Trip to Dispatch", list(options.keys()))
-            selected_trip  = options[selected_label]
-
-            # Show pre-dispatch summary
-            v = vehicles.get(selected_trip.vehicle_id)
-            d = drivers.get(selected_trip.driver_id)
-
-            col_v, col_d = st.columns(2)
-            with col_v:
-                st.markdown("**Vehicle at time of dispatch:**")
-                if v:
-                    v_color = VEHICLE_STATUS_COLORS.get(v.status, "#6b7280")
-                    st.markdown(
-                        f"🚛 `{v.registration_no}` — {v.model_name}  \n"
-                        f"Status: <span style='color:{v_color};font-weight:600'>{v.status}</span>  \n"
-                        f"Capacity: {v.max_capacity_kg:,.0f} kg",
-                        unsafe_allow_html=True,
-                    )
-            with col_d:
-                st.markdown("**Driver at time of dispatch:**")
-                if d:
-                    d_color   = DRIVER_STATUS_COLORS.get(d.status, "#6b7280")
-                    today     = datetime.date.today()
-                    lic_ok    = d.license_expiry >= today
-                    lic_color = "#10b981" if lic_ok else "#ef4444"
-                    st.markdown(
-                        f"👤 {d.name} — `{d.license_no}` ({d.license_category})  \n"
-                        f"Status: <span style='color:{d_color};font-weight:600'>{d.status}</span>  \n"
-                        f"License: <span style='color:{lic_color};font-weight:600'>"
-                        f"{'Valid' if lic_ok else 'EXPIRED'} ({d.license_expiry.strftime('%d %b %Y')})</span>  \n"
-                        f"Safety Score: {d.safety_score:.0f}/100",
-                        unsafe_allow_html=True,
-                    )
-
-            submitted = st.form_submit_button("🚀 Confirm Dispatch", use_container_width=True, type="primary")
-            if submitted:
-                try:
-                    dispatch(selected_trip.id)
-                    st.success(
-                        f"✅ Trip **{selected_trip.trip_code}** dispatched! "
-                        f"Vehicle and driver are now On Trip."
-                    )
-                    st.rerun()
-                except ValueError as e:
-                    st.error(f"❌ Dispatch failed: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Form: Complete Trip
-# ---------------------------------------------------------------------------
-
-def _form_complete(trips: list, vehicles: dict) -> None:
-    """Expander form to complete a Dispatched trip."""
-    dispatched_trips = [t for t in trips if t.status == TripStatus.DISPATCHED]
-
-    with st.expander("✅ Complete Trip", expanded=False):
-        if not dispatched_trips:
-            st.info("No Dispatched trips to complete.")
-            return
-
-        options = {
-            f"{t.trip_code} | {t.source} → {t.destination}": t
-            for t in dispatched_trips
-        }
-
-        with st.form("form_complete_trip"):
-            selected_label = st.selectbox("Select Dispatched Trip to Complete", list(options.keys()))
-            selected_trip  = options[selected_label]
-
-            v = vehicles.get(selected_trip.vehicle_id)
-            current_odo = float(v.odometer) if v else 0.0
-
+    # Complete form
+    if st.session_state.get(_KEY_COMPLETE) == t["id"]:
+        st.markdown("---")
+        st.markdown(f"**Complete Trip: {t['trip_code']}**")
+        with st.form("complete_form"):
+            fuel = st.number_input("Fuel Consumed (L) — optional",
+                                   min_value=0.0, value=0.0, step=1.0)
+            odo  = st.number_input("Final Odometer (km) — optional",
+                                   min_value=0.0, value=0.0, step=10.0)
             c1, c2 = st.columns(2)
-            fuel_consumed = c1.number_input(
-                "Fuel Consumed (L)", min_value=0.0, value=0.0, step=1.0,
-                help="Leave as 0 to skip fuel recording"
-            )
-            final_odo = c2.number_input(
-                f"Final Odometer (km)  [Current: {current_odo:,.0f} km]",
-                min_value=current_odo,
-                value=current_odo + selected_trip.planned_distance_km,
-                step=1.0,
-            )
+            with c1: confirm  = st.form_submit_button("✅ Confirm Complete",
+                                                       type="primary", use_container_width=True)
+            with c2: cancel_f = st.form_submit_button("✖ Cancel", use_container_width=True)
 
-            submitted = st.form_submit_button("✅ Mark as Completed", use_container_width=True, type="primary")
-            if submitted:
-                try:
-                    complete(
-                        trip_id=selected_trip.id,
-                        fuel_consumed_l=fuel_consumed if fuel_consumed > 0 else None,
-                        final_odometer=final_odo if final_odo > current_odo else None,
-                    )
-                    st.success(
-                        f"✅ Trip **{selected_trip.trip_code}** completed! "
-                        f"Vehicle and driver are now Available."
-                    )
-                    st.rerun()
-                except ValueError as e:
-                    st.error(f"❌ Could not complete trip: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Form: Cancel Trip
-# ---------------------------------------------------------------------------
-
-def _form_cancel(trips: list) -> None:
-    """Expander form to cancel a Draft or Dispatched trip."""
-    cancellable = [t for t in trips if t.status in (TripStatus.DRAFT, TripStatus.DISPATCHED)]
-
-    with st.expander("❌ Cancel Trip", expanded=False):
-        if not cancellable:
-            st.info("No Draft or Dispatched trips available to cancel.")
-            return
-
-        options = {
-            f"{t.trip_code} | {t.source} → {t.destination} [{t.status}]": t
-            for t in cancellable
-        }
-
-        selected_label = st.selectbox("Select Trip to Cancel", list(options.keys()), key="cancel_trip_select")
-        selected_trip  = options[selected_label]
-
-        if selected_trip.status == TripStatus.DISPATCHED:
-            st.warning(
-                f"⚠️ Trip **{selected_trip.trip_code}** is currently **Dispatched**. "
-                "Cancelling will restore the vehicle and driver to Available."
-            )
-        else:
-            st.info(f"Trip **{selected_trip.trip_code}** is a Draft — cancellation will not affect vehicle/driver status.")
-
-        confirm = st.checkbox("I confirm I want to cancel this trip", key="confirm_cancel_trip")
-        if st.button("❌ Cancel Trip", type="primary", disabled=not confirm, use_container_width=True, key="btn_cancel_trip"):
+        if confirm:
             try:
-                cancel(selected_trip.id)
-                st.success(f"Trip **{selected_trip.trip_code}** has been cancelled.")
+                complete_trip(t["id"], TripComplete(
+                    fuel_consumed_l=fuel if fuel > 0 else None,
+                    final_odometer =odo  if odo  > 0 else None,
+                ))
+                st.success(f"✅ Trip **{t['trip_code']}** completed!")
+                st.session_state[_KEY_COMPLETE] = None
                 st.rerun()
             except ValueError as e:
-                st.error(f"❌ {e}")
+                st.error(str(e))
+        if cancel_f:
+            st.session_state[_KEY_COMPLETE] = None
+            st.rerun()
 
-
-# ---------------------------------------------------------------------------
-# Tab 2 — Live Dispatch Board (Kanban)
-# ---------------------------------------------------------------------------
-
-def _render_trip_card(trip: Trip, vehicles: dict, drivers: dict) -> str:
-    """Return HTML for a single trip card on the dispatch board."""
-    v = vehicles.get(trip.vehicle_id)
-    d = drivers.get(trip.driver_id)
-
-    status_color = TRIP_STATUS_COLORS.get(trip.status, "#6b7280")
-
-    vehicle_line = f"🚛 {v.registration_no} — {v.model_name}" if v else "🚛 Unknown Vehicle"
-    driver_line  = f"👤 {d.name}" if d else "👤 Unknown Driver"
-
-    return f"""
-<div class="dispatch-card">
-    <div class="dispatch-card-code">{trip.trip_code}</div>
-    <div class="dispatch-card-route">📍 {trip.source} → {trip.destination}</div>
-    <div class="dispatch-card-detail">{vehicle_line}</div>
-    <div class="dispatch-card-detail">{driver_line}</div>
-    <div class="dispatch-card-detail">📦 {trip.cargo_weight_kg:,.0f} kg &nbsp;|&nbsp; 📏 {trip.planned_distance_km:,.0f} km</div>
-    <div class="dispatch-card-revenue">₹{trip.revenue:,.0f}</div>
-    <div class="dispatch-card-time">{trip.created_at.strftime('%d %b %Y · %H:%M') if trip.created_at else ''}</div>
-</div>
-"""
-
-
-def _render_dispatch_board(trips: list, vehicles: dict, drivers: dict) -> None:
-    """4-column kanban board showing trips grouped by status."""
-    statuses = [
-        (TripStatus.DRAFT,      "📝 Draft",      "#3b82f6"),
-        (TripStatus.DISPATCHED, "🚀 Dispatched", "#f59e0b"),
-        (TripStatus.COMPLETED,  "✅ Completed",  "#10b981"),
-        (TripStatus.CANCELLED,  "❌ Cancelled",  "#ef4444"),
-    ]
-
-    cols = st.columns(4, gap="small")
-    for col, (status, label, color) in zip(cols, statuses):
-        status_trips = [t for t in trips if t.status == status]
-        with col:
-            # Column header
-            st.markdown(
-                f"""
-                <div class="dispatch-col-header" style="border-top: 3px solid {color};">
-                    <span style="color:{color}; font-weight:700; font-size:1rem;">{label}</span>
-                    <span class="dispatch-col-count" style="background:{color}22; color:{color};">{len(status_trips)}</span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            if status_trips:
-                cards_html = "".join(_render_trip_card(t, vehicles, drivers) for t in status_trips)
-                st.markdown(cards_html, unsafe_allow_html=True)
-            else:
-                st.markdown(
-                    f'<div class="dispatch-empty">No {status.lower()} trips</div>',
-                    unsafe_allow_html=True,
-                )
-
-
-# ---------------------------------------------------------------------------
-# Main render
-# ---------------------------------------------------------------------------
-
-def render() -> None:
-    """Render the Trip Dispatcher page (two tabs)."""
-    st.markdown(
-        '<div class="page-header"><h1 class="page-title">🗺️ Trip Dispatcher</h1></div>',
-        unsafe_allow_html=True,
-    )
-
-    user     = get_current_user()
-    editable = can_edit(user["role_name"], "Trips") if user else False
-
-    # ---- Load data ----
-    trips, vehicles, drivers = _load_all_trips()
-
-    # ---- Tabs ----
-    tab1, tab2 = st.tabs(["🗺️ Trip Dispatcher", "📋 Live Dispatch Board"])
-
-    # ================================================================
-    # TAB 1 — Trip Dispatcher
-    # ================================================================
-    with tab1:
-        # Search & Filter
-        col_search, col_filter, col_refresh = st.columns([3, 1, 1])
-        search_term   = col_search.text_input(
-            "🔍 Search trips",
-            placeholder="Trip code, origin, or destination",
-            label_visibility="collapsed",
-            key="trip_search",
-        )
-        status_options = ["All"] + [s.value for s in TripStatus]
-        status_filter  = col_filter.selectbox(
-            "Filter", status_options, label_visibility="collapsed", key="trip_status_filter"
-        )
-        with col_refresh:
-            if st.button("🔄 Refresh", use_container_width=True, key="btn_refresh_trips"):
+    # Cancel confirmation
+    if st.session_state.get(_KEY_CANCEL) == t["id"]:
+        st.warning(f"⚠️ Cancel trip **{t['trip_code']}**? "
+                   "If Dispatched, vehicle and driver will be released.")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ Yes, Cancel", use_container_width=True,
+                         key="trip_cancel_confirm"):
+                try:
+                    cancel_trip(t["id"])
+                    st.success("Trip cancelled.")
+                    st.session_state[_KEY_CANCEL] = None
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+        with c2:
+            if st.button("Keep Trip", use_container_width=True, key="trip_cancel_abort"):
+                st.session_state[_KEY_CANCEL] = None
                 st.rerun()
 
-        # Apply client-side filters to loaded data
-        filtered = trips
-        if search_term:
-            term = search_term.lower()
-            filtered = [
-                t for t in filtered
-                if term in t.trip_code.lower()
-                or term in t.source.lower()
-                or term in t.destination.lower()
-            ]
-        if status_filter != "All":
-            filtered = [t for t in filtered if t.status == status_filter]
+    # Edit draft
+    if st.session_state.get(_KEY_EDIT) == t["id"]:
+        st.markdown("---")
+        st.markdown(f"**Edit Draft: {t['trip_code']}**")
+        with st.form("edit_trip_form"):
+            c1, c2 = st.columns(2)
+            with c1:
+                src  = st.text_input("Origin",      value=t["source"])
+                dst  = st.text_input("Destination", value=t["destination"])
+                dist = st.number_input("Distance (km)", min_value=1.0,
+                                       value=float(t["planned_distance_km"]), step=10.0)
+            with c2:
+                cw   = st.number_input("Cargo (kg)",    min_value=0.0,
+                                       value=float(t["cargo_weight_kg"]), step=50.0)
+                rev  = st.number_input("Revenue (Rs.)", min_value=0.0,
+                                       value=float(t["revenue"]), step=500.0, format="%.0f")
+            c1b, c2b = st.columns(2)
+            with c1b: save = st.form_submit_button("💾 Save", type="primary",
+                                                    use_container_width=True)
+            with c2b: canc = st.form_submit_button("✖ Cancel", use_container_width=True)
 
-        # Metrics
-        _metrics_row(trips)  # metrics always show totals across all trips
-        st.divider()
-
-        # Trips table
-        st.markdown("#### 📋 All Trips")
-        _trips_table(filtered, vehicles, drivers)
-
-        # ---- CRUD actions ----
-        if editable:
-            st.divider()
-            st.markdown("### ⚙️ Trip Actions")
-            _form_create_draft()
-            _form_dispatch(trips, vehicles, drivers)
-            _form_complete(trips, vehicles)
-            _form_cancel(trips)
-        else:
-            st.info("🔒 You have view-only access to the Trip Dispatcher. Contact a Dispatcher to manage trips.")
-
-    # ================================================================
-    # TAB 2 — Live Dispatch Board
-    # ================================================================
-    with tab2:
-        hdr_col, refresh_col = st.columns([6, 1])
-        with hdr_col:
-            st.markdown(
-                f"<p style='color:#9ca3af; font-size:0.85rem; margin:0;'>"
-                f"Live view • Last updated: {datetime.datetime.now().strftime('%H:%M:%S')}</p>",
-                unsafe_allow_html=True,
-            )
-        with refresh_col:
-            if st.button("🔄 Refresh", use_container_width=True, key="btn_refresh_board"):
+        if save:
+            try:
+                update_trip(t["id"], TripUpdate(
+                    source=src, destination=dst,
+                    cargo_weight_kg=cw, planned_distance_km=dist, revenue=rev,
+                ))
+                st.success("Draft updated.")
+                st.session_state[_KEY_EDIT] = None
                 st.rerun()
+            except (ValidationError, ValueError) as e:
+                st.error(str(e))
+        if canc:
+            st.session_state[_KEY_EDIT] = None
+            st.rerun()
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        _render_dispatch_board(trips, vehicles, drivers)
+
+def render():
+    _init()
+    st.markdown('<div class="page-header"><h1 class="page-title">🗺️ Trip Dispatcher</h1></div>',
+                unsafe_allow_html=True)
+
+    _kpis(get_trip_summary())
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    tabs = ["📋 All Trips"]
+    if can("trips.create"):
+        tabs.append("➕ Create Trip")
+
+    rendered_tabs = st.tabs(tabs)
+    tab_list = rendered_tabs[0]
+    tab_new  = rendered_tabs[1] if len(rendered_tabs) > 1 else None
+
+    if tab_new:
+        with tab_new:
+            _create_form()
+
+    with tab_list:
+        if not can("trips.create") and not can("trips.dispatch"):
+            st.info("🔒 You have **view-only** access to Trips.")
+
+        status_filter = st.selectbox("Filter by Status",
+                                     ["All"] + [s.value for s in TripStatus],
+                                     key="trip_status_filter")
+        trips = get_all_trips(status_filter=status_filter)
+        st.caption(f"{len(trips)} trip(s) found")
+        _trip_table(trips)
+        _actions_panel(trips)

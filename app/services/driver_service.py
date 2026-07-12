@@ -2,200 +2,208 @@
 app/services/driver_service.py
 
 Purpose:
-    Business logic for Driver CRUD operations.
+    All Driver business logic — CRUD operations, status management, filters.
 
 Reason:
-    Keeps all driver-related DB mutations and validation in one place,
-    away from the Streamlit UI layer. License validation and uniqueness
-    checks are enforced here so the UI simply displays any ValueError raised.
+    Zero Streamlit imports. Returns plain Python dicts.
+
+Business Rules:
+    - License number must be unique
+    - Cannot hard-delete a driver with trip history (soft-retire)
+    - Safety score < 70 → status flagged as Suspended automatically on update
+    - License expiry within 30 days → warning returned in response
 """
 
+from __future__ import annotations
 import datetime
 from typing import Optional
 
+from sqlalchemy.exc import IntegrityError
+
 from app.database.engine import get_session
-from app.models.driver import Driver
-from app.constants import DriverStatus
+from app.models import Driver, Trip
+from app.constants import DriverStatus, TripStatus
+from app.schemas.driver_schema import DriverCreate, DriverUpdate
+from app.logger import get_logger
+
+log = get_logger(__name__)
+
+LICENSE_WARN_DAYS = 30   # warn if expiring within this many days
+SAFETY_SUSPEND_THRESHOLD = 70.0  # auto-suspend below this score
 
 
-# ---------------------------------------------------------------------------
-# Read
-# ---------------------------------------------------------------------------
+def _to_dict(d: Driver) -> dict:
+    """Convert a Driver ORM object to a plain dict."""
+    today = datetime.date.today()
+    days_to_expiry = (d.license_expiry - today).days
+    return {
+        "id":               d.id,
+        "name":             d.name,
+        "license_no":       d.license_no,
+        "license_category": d.license_category,
+        "license_expiry":   d.license_expiry,
+        "contact_no":       d.contact_no,
+        "safety_score":     d.safety_score,
+        "status":           d.status,
+        # Derived fields for UI convenience
+        "license_expired":  days_to_expiry < 0,
+        "license_expiring_soon": 0 <= days_to_expiry <= LICENSE_WARN_DAYS,
+        "days_to_expiry":   days_to_expiry,
+    }
 
-def list_drivers(
-    search: str = "",
-    status_filter: Optional[str] = None,
-) -> list[Driver]:
-    """
-    Return all drivers, optionally filtered by search string and/or status.
 
-    search:        Case-insensitive match against name or license_no.
-    status_filter: If provided, only return drivers with this status.
-    """
+def get_all_drivers(
+    status_filter:   Optional[str] = None,
+    category_filter: Optional[str] = None,
+    name_search:     Optional[str] = None,
+) -> list[dict]:
+    """Return all drivers, optionally filtered."""
     with get_session() as session:
-        query = session.query(Driver)
-
-        if search:
-            term = f"%{search.lower()}%"
-            query = query.filter(
-                (Driver.name.ilike(term)) |
-                (Driver.license_no.ilike(term))
-            )
-
+        q = session.query(Driver)
         if status_filter and status_filter != "All":
-            query = query.filter(Driver.status == status_filter)
+            q = q.filter(Driver.status == status_filter)
+        if category_filter and category_filter != "All":
+            q = q.filter(Driver.license_category == category_filter)
+        drivers = q.order_by(Driver.name).all()
+        results = [_to_dict(d) for d in drivers]
+        if name_search:
+            name_search = name_search.lower()
+            results = [d for d in results if name_search in d["name"].lower()]
+        return results
 
-        drivers = query.order_by(Driver.name).all()
 
-    return drivers
-
-
-def get_driver(driver_id: int) -> Optional[Driver]:
-    """Return a single driver by PK, or None if not found."""
+def get_driver_by_id(driver_id: int) -> Optional[dict]:
+    """Return a single driver by ID, or None."""
     with get_session() as session:
-        return session.query(Driver).filter(Driver.id == driver_id).first()
+        d = session.query(Driver).filter(Driver.id == driver_id).first()
+        return _to_dict(d) if d else None
 
 
-# ---------------------------------------------------------------------------
-# Create
-# ---------------------------------------------------------------------------
-
-def create_driver(
-    name: str,
-    license_no: str,
-    license_category: str,
-    license_expiry: datetime.date,
-    contact_no: str,
-    safety_score: float = 100.0,
-    status: str = DriverStatus.AVAILABLE,
-) -> Driver:
+def create_driver(data: DriverCreate) -> dict:
     """
-    Create and persist a new driver.
+    Create a new driver record.
 
     Raises:
-        ValueError: If license_no already exists or required fields are invalid.
+        ValueError: If license_no already exists.
     """
-    name = name.strip()
-    license_no = license_no.strip().upper()
-
-    if not name:
-        raise ValueError("Driver name cannot be blank.")
-    if not license_no:
-        raise ValueError("License number cannot be blank.")
-    if not contact_no.strip():
-        raise ValueError("Contact number cannot be blank.")
-    if not (0.0 <= safety_score <= 100.0):
-        raise ValueError("Safety score must be between 0 and 100.")
-    if license_expiry < datetime.date.today():
-        raise ValueError(
-            f"License expiry ({license_expiry.strftime('%d %b %Y')}) is already in the past. "
-            "Cannot add a driver with an expired license."
-        )
-
     with get_session() as session:
-        existing = (
-            session.query(Driver)
-            .filter(Driver.license_no == license_no)
-            .first()
-        )
-        if existing:
-            raise ValueError(
-                f"License number '{license_no}' is already registered to another driver."
-            )
-
         driver = Driver(
-            name=name,
-            license_no=license_no,
-            license_category=license_category,
-            license_expiry=license_expiry,
-            contact_no=contact_no.strip(),
-            safety_score=safety_score,
-            status=status,
+            name              = data.name,
+            license_no        = data.license_no,
+            license_category  = data.license_category,
+            license_expiry    = data.license_expiry,
+            contact_no        = data.contact_no,
+            safety_score      = data.safety_score,
+            status            = DriverStatus.AVAILABLE,
         )
-        session.add(driver)
 
-    return driver
-
-
-# ---------------------------------------------------------------------------
-# Update
-# ---------------------------------------------------------------------------
-
-def update_driver(
-    driver_id: int,
-    *,
-    name: Optional[str] = None,
-    license_no: Optional[str] = None,
-    license_category: Optional[str] = None,
-    license_expiry: Optional[datetime.date] = None,
-    contact_no: Optional[str] = None,
-    safety_score: Optional[float] = None,
-    status: Optional[str] = None,
-) -> Driver:
-    """
-    Update an existing driver by ID. Only supplied (non-None) fields are changed.
-
-    Raises:
-        ValueError: If driver not found, license_no taken, or invalid values.
-    """
-    with get_session() as session:
-        driver = session.query(Driver).filter(Driver.id == driver_id).first()
-        if driver is None:
-            raise ValueError(f"Driver with ID {driver_id} not found.")
-
-        if name is not None:
-            if not name.strip():
-                raise ValueError("Driver name cannot be blank.")
-            driver.name = name.strip()
-
-        if license_no is not None:
-            lic = license_no.strip().upper()
-            conflict = (
-                session.query(Driver)
-                .filter(Driver.license_no == lic, Driver.id != driver_id)
-                .first()
+        # Auto-suspend if safety score is critically low on creation
+        if data.safety_score < SAFETY_SUSPEND_THRESHOLD:
+            driver.status = DriverStatus.SUSPENDED
+            log.warning(
+                "New driver created with low safety score (%.1f) — auto-suspended: %s",
+                data.safety_score, data.name,
             )
-            if conflict:
-                raise ValueError(
-                    f"License number '{lic}' is already registered to another driver."
-                )
-            driver.license_no = lic
 
-        if license_category is not None:
-            driver.license_category = license_category
+        session.add(driver)
+        try:
+            session.flush()
+        except IntegrityError:
+            session.rollback()
+            raise ValueError(
+                f"License number '{data.license_no}' is already registered. "
+                "Each driver must have a unique license number."
+            )
 
-        if license_expiry is not None:
-            driver.license_expiry = license_expiry
-
-        if contact_no is not None:
-            if not contact_no.strip():
-                raise ValueError("Contact number cannot be blank.")
-            driver.contact_no = contact_no.strip()
-
-        if safety_score is not None:
-            if not (0.0 <= safety_score <= 100.0):
-                raise ValueError("Safety score must be between 0 and 100.")
-            driver.safety_score = safety_score
-
-        if status is not None:
-            driver.status = status
-
-    return driver
+        log.info("Driver created: name=%s license=%s", driver.name, driver.license_no)
+        return _to_dict(driver)
 
 
-# ---------------------------------------------------------------------------
-# Delete
-# ---------------------------------------------------------------------------
-
-def delete_driver(driver_id: int) -> None:
+def update_driver(driver_id: int, data: DriverUpdate) -> dict:
     """
-    Permanently delete a driver from the system.
+    Update a driver's fields. Only non-None fields are changed.
+
+    Business Rule:
+        If safety_score drops below threshold, status → Suspended.
 
     Raises:
         ValueError: If driver not found.
     """
     with get_session() as session:
         driver = session.query(Driver).filter(Driver.id == driver_id).first()
-        if driver is None:
+        if not driver:
             raise ValueError(f"Driver with ID {driver_id} not found.")
+
+        if data.name              is not None: driver.name              = data.name
+        if data.license_no        is not None: driver.license_no        = data.license_no
+        if data.license_category  is not None: driver.license_category  = data.license_category
+        if data.license_expiry    is not None: driver.license_expiry    = data.license_expiry
+        if data.contact_no        is not None: driver.contact_no        = data.contact_no
+        if data.status            is not None: driver.status            = data.status
+
+        if data.safety_score is not None:
+            driver.safety_score = data.safety_score
+            if data.safety_score < SAFETY_SUSPEND_THRESHOLD and driver.status == DriverStatus.AVAILABLE:
+                driver.status = DriverStatus.SUSPENDED
+                log.warning(
+                    "Driver safety score dropped below %.0f — auto-suspended: id=%s name=%s",
+                    SAFETY_SUSPEND_THRESHOLD, driver.id, driver.name,
+                )
+
+        session.flush()
+        log.info("Driver updated: id=%s name=%s", driver.id, driver.name)
+        return _to_dict(driver)
+
+
+def delete_driver(driver_id: int) -> str:
+    """
+    Remove a driver record.
+
+    Business Rule:
+        - Active (Dispatched) trips → raise ValueError (block).
+        - Any historical trips → soft-retire (status = Off Duty).
+        - No trips → hard delete.
+
+    Returns:
+        "deleted" or "retired" depending on action taken.
+    """
+    with get_session() as session:
+        driver = session.query(Driver).filter(Driver.id == driver_id).first()
+        if not driver:
+            raise ValueError(f"Driver with ID {driver_id} not found.")
+
+        trips = session.query(Trip).filter(Trip.driver_id == driver_id).all()
+
+        active = [t for t in trips if t.status == TripStatus.DISPATCHED]
+        if active:
+            raise ValueError(
+                f"Cannot remove driver '{driver.name}': they have {len(active)} "
+                "active trip(s) in progress. Complete or cancel those trips first."
+            )
+
+        if trips:
+            driver.status = DriverStatus.OFF_DUTY
+            log.info("Driver retired (has trip history): id=%s name=%s", driver.id, driver.name)
+            return "retired"
+
         session.delete(driver)
+        log.info("Driver deleted: id=%s name=%s", driver_id, driver.name)
+        return "deleted"
+
+
+def get_driver_summary() -> dict:
+    """Return KPI counts for the Drivers page header."""
+    with get_session() as session:
+        drivers = session.query(Driver).all()
+        today = datetime.date.today()
+        return {
+            "total":          len(drivers),
+            "available":      sum(1 for d in drivers if d.status == DriverStatus.AVAILABLE),
+            "on_trip":        sum(1 for d in drivers if d.status == DriverStatus.ON_TRIP),
+            "suspended":      sum(1 for d in drivers if d.status == DriverStatus.SUSPENDED),
+            "expired_license":sum(1 for d in drivers if d.license_expiry < today),
+            "expiring_soon":  sum(
+                1 for d in drivers
+                if 0 <= (d.license_expiry - today).days <= LICENSE_WARN_DAYS
+            ),
+        }

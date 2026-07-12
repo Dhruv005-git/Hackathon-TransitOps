@@ -1,379 +1,276 @@
 """
-app/services/trip_service.py
+app/services/trip_service.py — Phase 3
 
-Purpose:
-    Business logic for the complete Trip lifecycle:
-    create_draft → dispatch → complete / cancel
-
-Reason:
-    All status transitions and validations live here so the UI layer
-    never touches the DB directly. Every function raises ValueError with
-    a human-readable message on rule violation, which the UI displays.
-
-Business Rules (enforced here, not in the UI):
-    Dispatch:
-        - Vehicle must be Available
-        - Driver must be Available
-        - Driver license must NOT be expired
-        - Driver status must NOT be Suspended
-        - cargo_weight_kg ≤ vehicle.max_capacity_kg
-    Dispatch side-effects:
-        - Vehicle.status → On Trip
-        - Driver.status  → On Trip
-    Complete side-effects:
-        - Vehicle.status → Available
-        - Driver.status  → Available
-        - Optionally updates Vehicle.odometer
-    Cancel side-effects:
-        - If trip was Dispatched: Vehicle.status → Available, Driver.status → Available
-        - If trip was Draft: no vehicle/driver change (they were never set On Trip)
+Business Rules enforced:
+  - Dispatch: Vehicle must be Available, Driver must be Available,
+    license not expired, cargo_weight_kg <= vehicle.max_capacity_kg
+  - Dispatch sets Vehicle → On Trip, Driver → On Trip
+  - Complete sets Vehicle → Available, Driver → Available
+  - Cancel from Dispatched also releases Vehicle + Driver
+  - Only Draft trips can be edited or re-dispatched
 """
-
-import datetime
+from __future__ import annotations
+import uuid, datetime
 from typing import Optional
 
+from sqlalchemy.exc import IntegrityError
+
 from app.database.engine import get_session
-from app.models.trip import Trip
-from app.models.vehicle import Vehicle
-from app.models.driver import Driver
+from app.models import Trip, Vehicle, Driver
 from app.constants import TripStatus, VehicleStatus, DriverStatus
+from app.schemas.trip_schema import TripCreate, TripUpdate, TripComplete
+from app.logger import get_logger
+
+log = get_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _generate_trip_code(session) -> str:
-    """
-    Generate a unique trip code in the format TR-YYYYMMDD-NNN.
-
-    Uses the current count of all trips (including any created today)
-    so the sequence number is always monotonically increasing within a session.
-    """
-    today_str = datetime.date.today().strftime("%Y%m%d")
-    count = session.query(Trip).count()
-    return f"TR-{today_str}-{count + 1:03d}"
+def _trip_code() -> str:
+    return f"TRP-{datetime.date.today().strftime('%d%m%y')}-{str(uuid.uuid4())[:6].upper()}"
 
 
-# ---------------------------------------------------------------------------
-# Read
-# ---------------------------------------------------------------------------
+def _to_dict(t: Trip, vehicles: dict = None, drivers: dict = None) -> dict:
+    return {
+        "id":                  t.id,
+        "trip_code":           t.trip_code,
+        "source":              t.source,
+        "destination":         t.destination,
+        "vehicle_id":          t.vehicle_id,
+        "driver_id":           t.driver_id,
+        "cargo_weight_kg":     t.cargo_weight_kg,
+        "planned_distance_km": t.planned_distance_km,
+        "revenue":             t.revenue,
+        "status":              t.status,
+        "fuel_consumed_l":     t.fuel_consumed_l,
+        "final_odometer":      t.final_odometer,
+        "created_at":          t.created_at,
+        "vehicle_reg":         (vehicles or {}).get(t.vehicle_id, f"#{t.vehicle_id}"),
+        "driver_name":         (drivers or {}).get(t.driver_id, f"#{t.driver_id}"),
+    }
 
-def list_trips(
-    search: str = "",
-    status_filter: Optional[str] = None,
-) -> list[Trip]:
-    """
-    Return all trips, optionally filtered by search string and/or status.
 
-    search:        Case-insensitive match against trip_code, source, or destination.
-    status_filter: If provided (and not "All"), only return trips with this status.
-    """
-    with get_session() as session:
-        query = session.query(Trip)
+def _load_lookups(session):
+    v_map = {v.id: v.registration_no for v in session.query(Vehicle).all()}
+    d_map = {d.id: d.name           for d in session.query(Driver).all()}
+    return v_map, d_map
 
-        if search:
-            term = f"%{search.lower()}%"
-            query = query.filter(
-                Trip.trip_code.ilike(term) |
-                Trip.source.ilike(term) |
-                Trip.destination.ilike(term)
-            )
 
+def get_all_trips(status_filter: Optional[str] = None) -> list[dict]:
+    with get_session() as s:
+        q = s.query(Trip)
         if status_filter and status_filter != "All":
-            query = query.filter(Trip.status == status_filter)
-
-        trips = query.order_by(Trip.created_at.desc()).all()
-
-    return trips
-
-
-def get_trip(trip_id: int) -> Optional[Trip]:
-    """Return a single trip by PK, or None if not found."""
-    with get_session() as session:
-        return session.query(Trip).filter(Trip.id == trip_id).first()
+            q = q.filter(Trip.status == status_filter)
+        trips = q.order_by(Trip.created_at.desc()).all()
+        v_map, d_map = _load_lookups(s)
+        return [_to_dict(t, v_map, d_map) for t in trips]
 
 
-def list_available_vehicles(session=None) -> list[Vehicle]:
-    """Return all vehicles with status=Available (for dispatch form dropdowns)."""
-    if session:
-        return session.query(Vehicle).filter(
-            Vehicle.status == VehicleStatus.AVAILABLE
-        ).order_by(Vehicle.registration_no).all()
-    with get_session() as session:
-        return session.query(Vehicle).filter(
-            Vehicle.status == VehicleStatus.AVAILABLE
-        ).order_by(Vehicle.registration_no).all()
+def get_trip_by_id(trip_id: int) -> Optional[dict]:
+    with get_session() as s:
+        t = s.query(Trip).filter(Trip.id == trip_id).first()
+        if not t:
+            return None
+        v_map, d_map = _load_lookups(s)
+        return _to_dict(t, v_map, d_map)
 
 
-def list_available_drivers(session=None) -> list[Driver]:
-    """Return all drivers with status=Available and valid license (for dispatch form dropdowns)."""
-    if session:
-        return session.query(Driver).filter(
-            Driver.status == DriverStatus.AVAILABLE
-        ).order_by(Driver.name).all()
-    with get_session() as session:
-        return session.query(Driver).filter(
-            Driver.status == DriverStatus.AVAILABLE
-        ).order_by(Driver.name).all()
+def _validate_dispatch_rules(session, vehicle: Vehicle, driver: Driver,
+                              cargo_weight_kg: float) -> None:
+    """Shared validation for create + dispatch. Raises ValueError on rule violation."""
+    if vehicle.status != VehicleStatus.AVAILABLE:
+        raise ValueError(
+            f"Vehicle '{vehicle.registration_no}' is not available "
+            f"(current status: {vehicle.status}). Only Available vehicles can be dispatched."
+        )
+    if driver.status != DriverStatus.AVAILABLE:
+        raise ValueError(
+            f"Driver '{driver.name}' is not available "
+            f"(current status: {driver.status}). Only Available drivers can be dispatched."
+        )
+    if driver.license_expiry < datetime.date.today():
+        raise ValueError(
+            f"Driver '{driver.name}' has an expired license "
+            f"(expired: {driver.license_expiry}). Renew before dispatching."
+        )
+    if cargo_weight_kg > vehicle.max_capacity_kg:
+        raise ValueError(
+            f"Cargo weight {cargo_weight_kg:.0f} kg exceeds vehicle capacity "
+            f"{vehicle.max_capacity_kg:.0f} kg for '{vehicle.registration_no}'."
+        )
 
 
-# ---------------------------------------------------------------------------
-# Create Draft
-# ---------------------------------------------------------------------------
+def create_trip(data: TripCreate) -> dict:
+    """Create a trip in Draft status (no vehicle/driver locking yet)."""
+    with get_session() as s:
+        vehicle = s.query(Vehicle).filter(Vehicle.id == data.vehicle_id).first()
+        driver  = s.query(Driver).filter(Driver.id == data.driver_id).first()
+        if not vehicle:
+            raise ValueError(f"Vehicle ID {data.vehicle_id} not found.")
+        if not driver:
+            raise ValueError(f"Driver ID {data.driver_id} not found.")
 
-def create_draft(
-    source: str,
-    destination: str,
-    vehicle_id: int,
-    driver_id: int,
-    cargo_weight_kg: float,
-    planned_distance_km: float,
-    revenue: float,
-) -> Trip:
-    """
-    Create a new trip in Draft status.
-
-    Validates:
-        - source and destination are non-blank
-        - cargo_weight_kg ≤ vehicle.max_capacity_kg
-        - planned_distance_km > 0
-        - revenue >= 0
-        - vehicle and driver exist
-
-    Raises:
-        ValueError: On any validation failure.
-    """
-    source = source.strip()
-    destination = destination.strip()
-
-    if not source:
-        raise ValueError("Source/origin cannot be blank.")
-    if not destination:
-        raise ValueError("Destination cannot be blank.")
-    if source.lower() == destination.lower():
-        raise ValueError("Source and destination cannot be the same.")
-    if cargo_weight_kg <= 0:
-        raise ValueError("Cargo weight must be greater than 0 kg.")
-    if planned_distance_km <= 0:
-        raise ValueError("Planned distance must be greater than 0 km.")
-    if revenue < 0:
-        raise ValueError("Revenue cannot be negative.")
-
-    with get_session() as session:
-        vehicle = session.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
-        if vehicle is None:
-            raise ValueError(f"Vehicle with ID {vehicle_id} not found.")
-
-        driver = session.query(Driver).filter(Driver.id == driver_id).first()
-        if driver is None:
-            raise ValueError(f"Driver with ID {driver_id} not found.")
-
-        # Cargo capacity check (allowed even in Draft so planner can catch issues early)
-        if cargo_weight_kg > vehicle.max_capacity_kg:
+        # Soft check at create time (hard check at dispatch)
+        if data.cargo_weight_kg > vehicle.max_capacity_kg:
             raise ValueError(
-                f"Cargo weight {cargo_weight_kg:,.0f} kg exceeds vehicle capacity "
-                f"{vehicle.max_capacity_kg:,.0f} kg for {vehicle.registration_no}."
+                f"Cargo {data.cargo_weight_kg:.0f} kg exceeds vehicle capacity "
+                f"{vehicle.max_capacity_kg:.0f} kg."
             )
-
-        trip_code = _generate_trip_code(session)
 
         trip = Trip(
-            trip_code=trip_code,
-            source=source,
-            destination=destination,
-            vehicle_id=vehicle_id,
-            driver_id=driver_id,
-            cargo_weight_kg=cargo_weight_kg,
-            planned_distance_km=planned_distance_km,
-            revenue=revenue,
-            status=TripStatus.DRAFT,
+            trip_code           = _trip_code(),
+            source              = data.source,
+            destination         = data.destination,
+            vehicle_id          = data.vehicle_id,
+            driver_id           = data.driver_id,
+            cargo_weight_kg     = data.cargo_weight_kg,
+            planned_distance_km = data.planned_distance_km,
+            revenue             = data.revenue,
+            status              = TripStatus.DRAFT,
         )
-        session.add(trip)
+        s.add(trip)
+        s.flush()
+        v_map, d_map = _load_lookups(s)
+        log.info("Trip created: code=%s route=%s->%s", trip.trip_code, data.source, data.destination)
+        return _to_dict(trip, v_map, d_map)
 
-    return trip
 
-
-# ---------------------------------------------------------------------------
-# Dispatch
-# ---------------------------------------------------------------------------
-
-def dispatch(trip_id: int) -> Trip:
-    """
-    Transition a Draft trip to Dispatched.
-
-    Validates:
-        - Trip exists and is in Draft status
-        - Vehicle.status == Available
-        - Driver.status == Available
-        - Driver.license_expiry > today (not expired)
-        - Driver.status != Suspended
-
-    Side-effects on success:
-        - Trip.status     → Dispatched
-        - Vehicle.status  → On Trip
-        - Driver.status   → On Trip
-
-    Raises:
-        ValueError: On any validation failure.
-    """
-    with get_session() as session:
-        trip = session.query(Trip).filter(Trip.id == trip_id).first()
-        if trip is None:
-            raise ValueError(f"Trip with ID {trip_id} not found.")
+def update_trip(trip_id: int, data: TripUpdate) -> dict:
+    """Edit a Draft trip. Raises if trip is not in Draft status."""
+    with get_session() as s:
+        trip = s.query(Trip).filter(Trip.id == trip_id).first()
+        if not trip:
+            raise ValueError(f"Trip ID {trip_id} not found.")
         if trip.status != TripStatus.DRAFT:
-            raise ValueError(
-                f"Trip {trip.trip_code} is in '{trip.status}' status and cannot be dispatched. "
-                "Only Draft trips can be dispatched."
-            )
+            raise ValueError("Only Draft trips can be edited.")
 
-        vehicle = session.query(Vehicle).filter(Vehicle.id == trip.vehicle_id).first()
-        driver  = session.query(Driver).filter(Driver.id == trip.driver_id).first()
+        if data.source              is not None: trip.source              = data.source
+        if data.destination         is not None: trip.destination         = data.destination
+        if data.cargo_weight_kg     is not None: trip.cargo_weight_kg     = data.cargo_weight_kg
+        if data.planned_distance_km is not None: trip.planned_distance_km = data.planned_distance_km
+        if data.revenue             is not None: trip.revenue             = data.revenue
+        if data.vehicle_id          is not None: trip.vehicle_id          = data.vehicle_id
+        if data.driver_id           is not None: trip.driver_id           = data.driver_id
 
-        # ---- Vehicle validation ----
-        if vehicle.status != VehicleStatus.AVAILABLE:
-            raise ValueError(
-                f"Vehicle {vehicle.registration_no} is currently '{vehicle.status}'. "
-                "Only Available vehicles can be dispatched."
-            )
+        s.flush()
+        v_map, d_map = _load_lookups(s)
+        log.info("Trip updated: id=%s code=%s", trip.id, trip.trip_code)
+        return _to_dict(trip, v_map, d_map)
 
-        # ---- Driver validation ----
-        if driver.status == DriverStatus.SUSPENDED:
-            raise ValueError(
-                f"Driver {driver.name} is Suspended and cannot be assigned to a trip."
-            )
-        if driver.status != DriverStatus.AVAILABLE:
-            raise ValueError(
-                f"Driver {driver.name} is currently '{driver.status}'. "
-                "Only Available drivers can be dispatched."
-            )
 
-        # ---- License expiry ----
-        today = datetime.date.today()
-        if driver.license_expiry < today:
-            raise ValueError(
-                f"Driver {driver.name}'s license (#{driver.license_no}) expired on "
-                f"{driver.license_expiry.strftime('%d %b %Y')}. "
-                "License must be valid before dispatching."
-            )
+def dispatch_trip(trip_id: int) -> dict:
+    """
+    Dispatch a Draft trip.
+    Validates all business rules, then:
+      Trip → Dispatched, Vehicle → On Trip, Driver → On Trip
+    """
+    with get_session() as s:
+        trip    = s.query(Trip).filter(Trip.id == trip_id).first()
+        if not trip:
+            raise ValueError(f"Trip ID {trip_id} not found.")
+        if trip.status != TripStatus.DRAFT:
+            raise ValueError(f"Only Draft trips can be dispatched (current: {trip.status}).")
 
-        # ---- Cargo capacity (double-check in case vehicle was swapped) ----
-        if trip.cargo_weight_kg > vehicle.max_capacity_kg:
-            raise ValueError(
-                f"Cargo weight {trip.cargo_weight_kg:,.0f} kg exceeds vehicle capacity "
-                f"{vehicle.max_capacity_kg:,.0f} kg for {vehicle.registration_no}."
-            )
+        vehicle = s.query(Vehicle).filter(Vehicle.id == trip.vehicle_id).first()
+        driver  = s.query(Driver).filter(Driver.id == trip.driver_id).first()
 
-        # ---- Apply transitions ----
+        _validate_dispatch_rules(s, vehicle, driver, trip.cargo_weight_kg)
+
         trip.status    = TripStatus.DISPATCHED
         vehicle.status = VehicleStatus.ON_TRIP
         driver.status  = DriverStatus.ON_TRIP
 
-    return trip
+        s.flush()
+        v_map, d_map = _load_lookups(s)
+        log.info("Trip dispatched: code=%s vehicle=%s driver=%s",
+                 trip.trip_code, vehicle.registration_no, driver.name)
+        return _to_dict(trip, v_map, d_map)
 
 
-# ---------------------------------------------------------------------------
-# Complete
-# ---------------------------------------------------------------------------
-
-def complete(
-    trip_id: int,
-    fuel_consumed_l: Optional[float] = None,
-    final_odometer: Optional[float] = None,
-) -> Trip:
+def complete_trip(trip_id: int, data: TripComplete) -> dict:
     """
-    Transition a Dispatched trip to Completed.
-
-    Validates:
-        - Trip exists and is in Dispatched status
-        - fuel_consumed_l >= 0 if provided
-        - final_odometer >= vehicle.odometer if provided
-
-    Side-effects on success:
-        - Trip.status          → Completed
-        - Trip.fuel_consumed_l updated (if provided)
-        - Trip.final_odometer  updated (if provided)
-        - Vehicle.odometer     updated (if final_odometer provided)
-        - Vehicle.status       → Available
-        - Driver.status        → Available
-
-    Raises:
-        ValueError: On any validation failure.
+    Complete a Dispatched trip.
+    Trip → Completed, Vehicle → Available, Driver → Available
+    Optionally records fuel_consumed_l and final_odometer.
     """
-    with get_session() as session:
-        trip = session.query(Trip).filter(Trip.id == trip_id).first()
-        if trip is None:
-            raise ValueError(f"Trip with ID {trip_id} not found.")
+    with get_session() as s:
+        trip   = s.query(Trip).filter(Trip.id == trip_id).first()
+        if not trip:
+            raise ValueError(f"Trip ID {trip_id} not found.")
         if trip.status != TripStatus.DISPATCHED:
-            raise ValueError(
-                f"Trip {trip.trip_code} is in '{trip.status}' status and cannot be completed. "
-                "Only Dispatched trips can be completed."
-            )
+            raise ValueError(f"Only Dispatched trips can be completed (current: {trip.status}).")
 
-        vehicle = session.query(Vehicle).filter(Vehicle.id == trip.vehicle_id).first()
-        driver  = session.query(Driver).filter(Driver.id == trip.driver_id).first()
+        vehicle = s.query(Vehicle).filter(Vehicle.id == trip.vehicle_id).first()
+        driver  = s.query(Driver).filter(Driver.id == trip.driver_id).first()
 
-        # Fuel validation
-        if fuel_consumed_l is not None:
-            if fuel_consumed_l < 0:
-                raise ValueError("Fuel consumed cannot be negative.")
-            trip.fuel_consumed_l = fuel_consumed_l
-
-        # Odometer validation
-        if final_odometer is not None:
-            if final_odometer < vehicle.odometer:
-                raise ValueError(
-                    f"Final odometer ({final_odometer:,.0f} km) cannot be less than "
-                    f"current odometer ({vehicle.odometer:,.0f} km)."
-                )
-            trip.final_odometer = final_odometer
-            vehicle.odometer    = final_odometer
-
-        # ---- Apply transitions ----
         trip.status    = TripStatus.COMPLETED
         vehicle.status = VehicleStatus.AVAILABLE
         driver.status  = DriverStatus.AVAILABLE
 
-    return trip
+        if data.fuel_consumed_l is not None:
+            trip.fuel_consumed_l = data.fuel_consumed_l
+        if data.final_odometer is not None:
+            trip.final_odometer  = data.final_odometer
+            vehicle.odometer     = data.final_odometer
+
+        s.flush()
+        v_map, d_map = _load_lookups(s)
+        log.info("Trip completed: code=%s", trip.trip_code)
+        return _to_dict(trip, v_map, d_map)
 
 
-# ---------------------------------------------------------------------------
-# Cancel
-# ---------------------------------------------------------------------------
-
-def cancel(trip_id: int) -> Trip:
+def cancel_trip(trip_id: int) -> dict:
     """
     Cancel a Draft or Dispatched trip.
-
-    Side-effects:
-        - Trip.status → Cancelled
-        - If trip was Dispatched: Vehicle.status → Available, Driver.status → Available
-        - If trip was Draft: no vehicle/driver status change (they were never set On Trip)
-
-    Raises:
-        ValueError: If trip not found or already Completed/Cancelled.
+    If Dispatched: release Vehicle → Available, Driver → Available
     """
-    with get_session() as session:
-        trip = session.query(Trip).filter(Trip.id == trip_id).first()
-        if trip is None:
-            raise ValueError(f"Trip with ID {trip_id} not found.")
-        if trip.status in (TripStatus.COMPLETED, TripStatus.CANCELLED):
-            raise ValueError(
-                f"Trip {trip.trip_code} is already '{trip.status}' and cannot be cancelled."
-            )
+    with get_session() as s:
+        trip = s.query(Trip).filter(Trip.id == trip_id).first()
+        if not trip:
+            raise ValueError(f"Trip ID {trip_id} not found.")
+        if trip.status not in (TripStatus.DRAFT, TripStatus.DISPATCHED):
+            raise ValueError(f"Cannot cancel a {trip.status} trip.")
 
-        was_dispatched = trip.status == TripStatus.DISPATCHED
+        if trip.status == TripStatus.DISPATCHED:
+            vehicle = s.query(Vehicle).filter(Vehicle.id == trip.vehicle_id).first()
+            driver  = s.query(Driver).filter(Driver.id == trip.driver_id).first()
+            if vehicle: vehicle.status = VehicleStatus.AVAILABLE
+            if driver:  driver.status  = DriverStatus.AVAILABLE
 
-        # Apply trip transition
         trip.status = TripStatus.CANCELLED
+        s.flush()
+        v_map, d_map = _load_lookups(s)
+        log.info("Trip cancelled: code=%s", trip.trip_code)
+        return _to_dict(trip, v_map, d_map)
 
-        # Restore vehicle and driver only if they were actively On Trip
-        if was_dispatched:
-            vehicle = session.query(Vehicle).filter(Vehicle.id == trip.vehicle_id).first()
-            driver  = session.query(Driver).filter(Driver.id == trip.driver_id).first()
-            if vehicle and vehicle.status == VehicleStatus.ON_TRIP:
-                vehicle.status = VehicleStatus.AVAILABLE
-            if driver and driver.status == DriverStatus.ON_TRIP:
-                driver.status = DriverStatus.AVAILABLE
 
-    return trip
+def get_trip_summary() -> dict:
+    with get_session() as s:
+        trips = s.query(Trip).all()
+        completed = [t for t in trips if t.status == TripStatus.COMPLETED]
+        return {
+            "total":      len(trips),
+            "draft":      sum(1 for t in trips if t.status == TripStatus.DRAFT),
+            "dispatched": sum(1 for t in trips if t.status == TripStatus.DISPATCHED),
+            "completed":  len(completed),
+            "cancelled":  sum(1 for t in trips if t.status == TripStatus.CANCELLED),
+            "revenue":    sum(t.revenue for t in completed),
+        }
+
+
+def get_available_vehicles() -> list[dict]:
+    """Return only Available vehicles for the dispatch form selector."""
+    with get_session() as s:
+        vs = s.query(Vehicle).filter(Vehicle.status == VehicleStatus.AVAILABLE).all()
+        return [{"id": v.id, "label": f"{v.registration_no} — {v.model_name} "
+                                      f"({v.max_capacity_kg:.0f} kg)"} for v in vs]
+
+
+def get_available_drivers() -> list[dict]:
+    """Return only Available drivers with valid licenses for the dispatch form."""
+    today = datetime.date.today()
+    with get_session() as s:
+        ds = s.query(Driver).filter(Driver.status == DriverStatus.AVAILABLE).all()
+        return [{"id": d.id,
+                 "label": f"{d.name} — {d.license_category} "
+                           f"{'[EXPIRED]' if d.license_expiry < today else ''}",
+                 "license_expired": d.license_expiry < today}
+                for d in ds]

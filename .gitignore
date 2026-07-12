@@ -2,17 +2,21 @@
 .env
 .venv/
 venv/
+env/
 
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.coverage
+*.log
 
 # Database
 data/*.db
+*.sqlite3
 
 # IDE
 .vscode/
@@ -24,3 +28,6 @@ Thumbs.db
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Jupyter
+.ipynb_checkpoints/
