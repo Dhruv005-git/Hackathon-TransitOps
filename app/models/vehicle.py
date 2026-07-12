@@ -19,7 +19,7 @@ class Vehicle(Base):
     __tablename__ = "vehicles"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    registration_no: Mapped[str] = mapped_column(String(20), unique=True, nullable=False)
+    registration_no: Mapped[str] = mapped_column(String(20), unique=True, nullable=False, index=True)
     model_name: Mapped[str] = mapped_column(String(100), nullable=False)
     type: Mapped[str] = mapped_column(String(20), nullable=False)  # Van / Truck / Mini
     max_capacity_kg: Mapped[float] = mapped_column(Float, nullable=False)

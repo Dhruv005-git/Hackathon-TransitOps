@@ -22,7 +22,7 @@ class Driver(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    license_no: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
+    license_no: Mapped[str] = mapped_column(String(30), unique=True, nullable=False, index=True)
     license_category: Mapped[str] = mapped_column(String(10), nullable=False)  # LMV / HMV
     license_expiry: Mapped[datetime.date] = mapped_column(Date, nullable=False)
     contact_no: Mapped[str] = mapped_column(String(20), nullable=False)
