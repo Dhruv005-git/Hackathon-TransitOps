@@ -6,13 +6,13 @@ from api.routes import auth, vehicles, drivers, trips, maintenance, analytics, f
 from contextlib import asynccontextmanager
 
 from app.database.engine import init_db
-from app.database.seed import seed_db
+from app.database.seed import seed_all
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize DB tables and seed initial data on startup
     init_db()
-    seed_db()
+    seed_all()
     yield
 
 app = FastAPI(
