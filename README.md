@@ -1,0 +1,142 @@
+# TransitOps 🚛
+### Smart Transport Operations Platform
+*Python · Streamlit · SQLAlchemy · SQLite · bcrypt*
+
+---
+
+## Quick Start
+
+### 1. Create & Activate Virtual Environment
+```bash
+# Windows
+python -m venv .venv
+.venv\Scripts\activate
+
+# Linux / macOS
+source .venv/bin/activate
+```
+
+### 2. Install Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Run the App
+```bash
+streamlit run app.py
+```
+Database is **auto-initialized and seeded** on first run — no manual DB step needed.
+
+---
+
+## Demo Credentials
+
+| Role | Email | Password |
+|------|-------|----------|
+| Fleet Manager | fleet@transitops.com | fleet123 |
+| Dispatcher | dispatch@transitops.com | dispatch123 |
+| Safety Officer | safety@transitops.com | safety123 |
+| Financial Analyst | finance@transitops.com | finance123 |
+
+---
+
+## Reset Database (Development)
+```bash
+python -c "from app.database.engine import reset_database; reset_database()"
+```
+Deletes the SQLite file, recreates all tables, and reseeds demo data in one command.
+
+---
+
+## Architecture
+
+### Single Entry Point Pattern
+This app uses **one `app.py` entry point** instead of Streamlit's built-in multipage routing.
+Each page in `frontend/pages/` exposes a `render()` function. The sidebar drives navigation
+via `st.session_state["current_page"]` and `frontend/router.py` dispatches to the correct page.
+
+```
+app.py  →  show_sidebar()  →  route_to_page()  →  page_x.render()
+```
+
+**Why not Streamlit's native multipage?**
+Streamlit requires pages in a root-level `pages/` folder. Our architecture uses
+`frontend/pages/` (per SDD) and needs centralized RBAC + auth — incompatible with
+Streamlit's routing. The render() pattern gives us full control with no hacks.
+
+### Adding a New Page (Phase 2+)
+1. Create `frontend/pages/page_newfeature.py` with a `render()` function
+2. Add one line to `PAGE_MAP` in `frontend/router.py`
+3. Add the RBAC entry in `app/auth/rbac.py`
+
+---
+
+## Project Structure
+
+```
+TransitOps/
+├── app.py                        ← Entry point: login + sidebar + calls router
+├── .env                          ← DATABASE_URL, SECRET_KEY, APP_NAME, DEBUG
+├── .env.example
+├── .streamlit/config.toml        ← Dark theme + orange accent
+├── requirements.txt
+├── README.md
+│
+├── app/                          ← Backend (zero Streamlit imports)
+│   ├── config.py                 ← Reads .env, all settings as typed constants
+│   ├── constants.py              ← Status enums: VehicleStatus, DriverStatus…
+│   ├── logger.py                 ← get_logger(__name__) factory
+│   ├── models/                   ← 8 SQLAlchemy ORM models
+│   │   ├── role.py, user.py, vehicle.py, driver.py
+│   │   ├── trip.py, maintenance.py, fuel_log.py, expense.py
+│   ├── auth/
+│   │   ├── hashing.py            ← bcrypt hash_password / verify_password
+│   │   └── rbac.py               ← 4-role × 8-module permission matrix
+│   ├── services/
+│   │   └── auth_service.py       ← login(), logout(), get_current_user()
+│   ├── database/
+│   │   ├── engine.py             ← get_session, init_db, reset_database
+│   │   └── seed.py               ← 4 roles, 4 users, 6 vehicles, 5 drivers, 5 trips
+│   └── utils/, schemas/          ← Populated in Phase 2+
+│
+├── frontend/
+│   ├── router.py                 ← PAGE_MAP + route_to_page() dispatcher
+│   ├── assets/style.css          ← Dark theme CSS
+│   ├── components/
+│   │   ├── auth_guard.py         ← require_auth(), require_role()
+│   │   ├── sidebar.py            ← Legacy (sidebar now in app.py)
+│   │   ├── kpi_card.py           ← render_kpi_card(value, label, color)
+│   │   └── status_badge.py       ← render_status_badge(status) → HTML
+│   └── pages/                    ← Each file: render() function only
+│       ├── page_dashboard.py     ← 7 KPIs + recent trips + vehicle chart
+│       ├── page_fleet.py         ← Vehicle table preview (CRUD in Phase 2)
+│       ├── page_drivers.py       ← Driver table + license check (CRUD in Phase 2)
+│       ├── page_trips.py         ← Trips table (dispatch engine in Phase 3)
+│       ├── page_maintenance.py   ← In Shop count (workflow in Phase 4)
+│       ├── page_fuel_expenses.py ← Cost totals (logging in Phase 4)
+│       ├── page_analytics.py     ← Top metrics (full charts in Phase 5)
+│       └── page_settings.py      ← RBAC matrix read-only (editable in Phase 5)
+│
+├── tests/                        ← Unit tests (Phase 2+)
+├── docs/
+│   └── phase1_report.html        ← Full Phase 1 technical report
+└── data/transitops.db            ← Auto-created on first run
+```
+
+---
+
+## Build Roadmap
+
+| Phase | Status | Scope |
+|-------|--------|-------|
+| **Phase 1** | ✅ **Complete** | Auth, DB (8 models), Seed, Dashboard, Dark Theme, Router, Enums, Logger |
+| Phase 2 | ⏳ Pending | Vehicle Registry CRUD + Driver Management CRUD |
+| Phase 3 | ⏳ Pending | Trip Dispatch Engine + Business Rule Validation |
+| Phase 4 | ⏳ Pending | Maintenance Workflow + Fuel & Expense Logging |
+| Phase 5 | ⏳ Pending | Analytics Charts + CSV Export + Editable Settings |
+
+---
+
+## Documentation
+
+Full Phase 1 technical report (architecture decisions, bugs fixed, features):
