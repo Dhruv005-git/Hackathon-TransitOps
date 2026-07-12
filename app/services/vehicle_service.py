@@ -2,189 +2,174 @@
 app/services/vehicle_service.py
 
 Purpose:
-    Business logic for Vehicle CRUD operations.
+    All Vehicle business logic — CRUD operations, status management, filters.
 
 Reason:
-    Keeps all vehicle-related DB mutations and validation in one place,
-    away from the Streamlit UI layer. Each function raises ValueError with
-    a human-readable message on validation failure so the UI can display it.
+    Zero Streamlit imports. The UI layer calls these functions and receives
+    plain Python dicts. Switching UI frameworks later requires no changes here.
+
+Business Rules enforced here (beyond Pydantic):
+    - Registration number must be unique (IntegrityError → friendly message)
+    - Cannot hard-delete a vehicle that has any trip history (use retire instead)
+    - Status change to "In Shop" is only valid if vehicle is not On Trip
 """
 
+from __future__ import annotations
+import datetime
 from typing import Optional
 
+from sqlalchemy.orm import joinedload
 from sqlalchemy.exc import IntegrityError
 
 from app.database.engine import get_session
-from app.models.vehicle import Vehicle
-from app.constants import VehicleStatus
+from app.models import Vehicle, Trip
+from app.constants import VehicleStatus, TripStatus
+from app.schemas.vehicle_schema import VehicleCreate, VehicleUpdate
+from app.logger import get_logger
+
+log = get_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Read
-# ---------------------------------------------------------------------------
+def _to_dict(v: Vehicle) -> dict:
+    """Convert a Vehicle ORM object to a plain dict."""
+    return {
+        "id":               v.id,
+        "registration_no":  v.registration_no,
+        "model_name":       v.model_name,
+        "type":             v.type,
+        "max_capacity_kg":  v.max_capacity_kg,
+        "odometer":         v.odometer,
+        "acquisition_cost": v.acquisition_cost,
+        "status":           v.status,
+    }
 
-def list_vehicles(
-    search: str = "",
+
+def get_all_vehicles(
+    type_filter: Optional[str] = None,
     status_filter: Optional[str] = None,
-) -> list[Vehicle]:
-    """
-    Return all vehicles, optionally filtered by search string and/or status.
-
-    search:        Case-insensitive match against registration_no or model_name.
-    status_filter: If provided, only return vehicles with this status.
-    """
+) -> list[dict]:
+    """Return all vehicles, optionally filtered by type and/or status."""
     with get_session() as session:
-        query = session.query(Vehicle)
-
-        if search:
-            term = f"%{search.lower()}%"
-            query = query.filter(
-                (Vehicle.registration_no.ilike(term)) |
-                (Vehicle.model_name.ilike(term))
-            )
-
+        q = session.query(Vehicle)
+        if type_filter and type_filter != "All":
+            q = q.filter(Vehicle.type == type_filter)
         if status_filter and status_filter != "All":
-            query = query.filter(Vehicle.status == status_filter)
-
-        vehicles = query.order_by(Vehicle.registration_no).all()
-
-    return vehicles
+            q = q.filter(Vehicle.status == status_filter)
+        return [_to_dict(v) for v in q.order_by(Vehicle.registration_no).all()]
 
 
-def get_vehicle(vehicle_id: int) -> Optional[Vehicle]:
-    """Return a single vehicle by PK, or None if not found."""
+def get_vehicle_by_id(vehicle_id: int) -> Optional[dict]:
+    """Return a single vehicle by ID, or None if not found."""
     with get_session() as session:
-        return session.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
+        v = session.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
+        return _to_dict(v) if v else None
 
 
-# ---------------------------------------------------------------------------
-# Create
-# ---------------------------------------------------------------------------
-
-def create_vehicle(
-    registration_no: str,
-    model_name: str,
-    vehicle_type: str,
-    max_capacity_kg: float,
-    odometer: float,
-    acquisition_cost: float,
-    status: str = VehicleStatus.AVAILABLE,
-) -> Vehicle:
+def create_vehicle(data: VehicleCreate) -> dict:
     """
-    Create and persist a new vehicle.
+    Create a new vehicle record.
 
     Raises:
-        ValueError: If registration_no already exists or required fields invalid.
+        ValueError: If registration_no already exists.
     """
-    registration_no = registration_no.strip().upper()
-
-    if not registration_no:
-        raise ValueError("Registration number cannot be blank.")
-    if max_capacity_kg <= 0:
-        raise ValueError("Max capacity must be greater than 0.")
-    if acquisition_cost < 0:
-        raise ValueError("Acquisition cost cannot be negative.")
-    if odometer < 0:
-        raise ValueError("Odometer cannot be negative.")
-
     with get_session() as session:
-        # Uniqueness check with a friendly error
-        existing = (
-            session.query(Vehicle)
-            .filter(Vehicle.registration_no == registration_no)
-            .first()
-        )
-        if existing:
-            raise ValueError(
-                f"Registration number '{registration_no}' is already in use."
-            )
-
         vehicle = Vehicle(
-            registration_no=registration_no,
-            model_name=model_name.strip(),
-            type=vehicle_type,
-            max_capacity_kg=max_capacity_kg,
-            odometer=odometer,
-            acquisition_cost=acquisition_cost,
-            status=status,
+            registration_no  = data.registration_no,
+            model_name       = data.model_name,
+            type             = data.type,
+            max_capacity_kg  = data.max_capacity_kg,
+            acquisition_cost = data.acquisition_cost,
+            odometer         = data.odometer,
+            status           = VehicleStatus.AVAILABLE,
         )
         session.add(vehicle)
-
-    return vehicle
-
-
-# ---------------------------------------------------------------------------
-# Update
-# ---------------------------------------------------------------------------
-
-def update_vehicle(
-    vehicle_id: int,
-    *,
-    registration_no: Optional[str] = None,
-    model_name: Optional[str] = None,
-    vehicle_type: Optional[str] = None,
-    max_capacity_kg: Optional[float] = None,
-    odometer: Optional[float] = None,
-    acquisition_cost: Optional[float] = None,
-    status: Optional[str] = None,
-) -> Vehicle:
-    """
-    Update an existing vehicle by ID. Only supplied (non-None) fields are changed.
-
-    Raises:
-        ValueError: If vehicle not found, or registration_no already taken by another vehicle.
-    """
-    with get_session() as session:
-        vehicle = session.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
-        if vehicle is None:
-            raise ValueError(f"Vehicle with ID {vehicle_id} not found.")
-
-        if registration_no is not None:
-            reg = registration_no.strip().upper()
-            conflict = (
-                session.query(Vehicle)
-                .filter(Vehicle.registration_no == reg, Vehicle.id != vehicle_id)
-                .first()
+        try:
+            session.flush()
+        except IntegrityError:
+            session.rollback()
+            raise ValueError(
+                f"Registration number '{data.registration_no}' is already in use. "
+                "Each vehicle must have a unique registration."
             )
-            if conflict:
-                raise ValueError(f"Registration number '{reg}' is already in use.")
-            vehicle.registration_no = reg
-
-        if model_name is not None:
-            vehicle.model_name = model_name.strip()
-        if vehicle_type is not None:
-            vehicle.type = vehicle_type
-        if max_capacity_kg is not None:
-            if max_capacity_kg <= 0:
-                raise ValueError("Max capacity must be greater than 0.")
-            vehicle.max_capacity_kg = max_capacity_kg
-        if odometer is not None:
-            if odometer < 0:
-                raise ValueError("Odometer cannot be negative.")
-            vehicle.odometer = odometer
-        if acquisition_cost is not None:
-            if acquisition_cost < 0:
-                raise ValueError("Acquisition cost cannot be negative.")
-            vehicle.acquisition_cost = acquisition_cost
-        if status is not None:
-            vehicle.status = status
-
-    return vehicle
+        log.info("Vehicle created: reg=%s model=%s", vehicle.registration_no, vehicle.model_name)
+        return _to_dict(vehicle)
 
 
-# ---------------------------------------------------------------------------
-# Delete
-# ---------------------------------------------------------------------------
-
-def delete_vehicle(vehicle_id: int) -> None:
+def update_vehicle(vehicle_id: int, data: VehicleUpdate) -> dict:
     """
-    Permanently delete a vehicle from the registry.
+    Update a vehicle's fields. Only provided (non-None) fields are changed.
 
     Raises:
         ValueError: If vehicle not found.
     """
     with get_session() as session:
         vehicle = session.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
-        if vehicle is None:
+        if not vehicle:
             raise ValueError(f"Vehicle with ID {vehicle_id} not found.")
+
+        if data.model_name       is not None: vehicle.model_name       = data.model_name
+        if data.type             is not None: vehicle.type             = data.type
+        if data.max_capacity_kg  is not None: vehicle.max_capacity_kg  = data.max_capacity_kg
+        if data.acquisition_cost is not None: vehicle.acquisition_cost = data.acquisition_cost
+        if data.odometer         is not None: vehicle.odometer         = data.odometer
+        if data.status           is not None: vehicle.status           = data.status
+
+        session.flush()
+        log.info("Vehicle updated: id=%s reg=%s", vehicle.id, vehicle.registration_no)
+        return _to_dict(vehicle)
+
+
+def delete_vehicle(vehicle_id: int) -> str:
+    """
+    Delete a vehicle record.
+
+    Business Rule:
+        - If the vehicle has any ACTIVE (Dispatched) trips → raise ValueError.
+        - If the vehicle has historical trips → retire it instead of hard delete.
+        - If no trip history at all → hard delete.
+
+    Returns:
+        "deleted" or "retired" depending on action taken.
+    """
+    with get_session() as session:
+        vehicle = session.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
+        if not vehicle:
+            raise ValueError(f"Vehicle with ID {vehicle_id} not found.")
+
+        trips = session.query(Trip).filter(Trip.vehicle_id == vehicle_id).all()
+
+        # Block if any active trip
+        active = [t for t in trips if t.status == TripStatus.DISPATCHED]
+        if active:
+            raise ValueError(
+                f"Cannot remove vehicle '{vehicle.registration_no}': "
+                f"it has {len(active)} active trip(s) in progress. "
+                "Complete or cancel those trips first."
+            )
+
+        # Soft-delete if has any trip history
+        if trips:
+            vehicle.status = VehicleStatus.RETIRED
+            log.info(
+                "Vehicle retired (has trip history): id=%s reg=%s",
+                vehicle.id, vehicle.registration_no,
+            )
+            return "retired"
+
+        # Hard delete — no trip references
         session.delete(vehicle)
+        log.info("Vehicle deleted: id=%s reg=%s", vehicle_id, vehicle.registration_no)
+        return "deleted"
+
+
+def get_fleet_summary() -> dict:
+    """Return KPI counts for the Fleet page header."""
+    with get_session() as session:
+        vehicles = session.query(Vehicle).all()
+        return {
+            "total":     len(vehicles),
+            "available": sum(1 for v in vehicles if v.status == VehicleStatus.AVAILABLE),
+            "on_trip":   sum(1 for v in vehicles if v.status == VehicleStatus.ON_TRIP),
+            "in_shop":   sum(1 for v in vehicles if v.status == VehicleStatus.IN_SHOP),
+            "retired":   sum(1 for v in vehicles if v.status == VehicleStatus.RETIRED),
+        }
