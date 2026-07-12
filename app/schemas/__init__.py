@@ -1,1 +1,1 @@
-# Schemas package — Pydantic validation schemas (populated in Phase 2+)
+# app.schemas package
