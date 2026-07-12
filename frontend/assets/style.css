@@ -232,3 +232,102 @@
     font-size: 0.8rem;
     font-weight: 500;
 }
+
+/* ============================================
+   LIVE DISPATCH BOARD (Phase 3)
+   ============================================ */
+
+/* Kanban column header */
+.dispatch-col-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 0.75rem 0.6rem;
+    margin-bottom: 0.75rem;
+    border-radius: 8px 8px 0 0;
+    background: var(--bg-secondary);
+}
+
+.dispatch-col-count {
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    min-width: 24px;
+    text-align: center;
+}
+
+/* Trip card on dispatch board */
+.dispatch-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 0.85rem 0.9rem;
+    margin-bottom: 0.65rem;
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    cursor: default;
+}
+
+.dispatch-card:hover {
+    transform: translateY(-2px);
+    border-color: var(--accent-orange);
+    box-shadow: 0 6px 18px rgba(245, 158, 11, 0.12);
+}
+
+.dispatch-card-code {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--accent-orange);
+    letter-spacing: 0.04em;
+    margin-bottom: 0.3rem;
+    font-family: 'Courier New', monospace;
+}
+
+.dispatch-card-route {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.45rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dispatch-card-detail {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.2rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dispatch-card-revenue {
+    display: inline-block;
+    margin-top: 0.5rem;
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: #10b981;
+    background: rgba(16, 185, 129, 0.12);
+    border: 1px solid rgba(16, 185, 129, 0.25);
+    border-radius: 6px;
+    padding: 2px 8px;
+}
+
+.dispatch-card-time {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    margin-top: 0.35rem;
+}
+
+/* Empty column placeholder */
+.dispatch-empty {
+    background: var(--bg-secondary);
+    border: 1px dashed var(--border-color);
+    border-radius: 10px;
+    padding: 2rem 1rem;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+
