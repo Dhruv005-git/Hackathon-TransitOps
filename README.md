@@ -95,7 +95,8 @@ TransitOps/
 │   ├── services/
 │   │   ├── auth_service.py       ← login(), logout(), get_current_user()
 │   │   ├── vehicle_service.py    ← create(), update(), delete(), list() + search/filter
-│   │   └── driver_service.py     ← create(), update(), delete(), list() + license validation
+│   │   ├── driver_service.py     ← create(), update(), delete(), list() + license validation
+│   │   └── trip_service.py       ← create_draft(), dispatch(), complete(), cancel() + validations
 │   ├── database/
 │   │   ├── engine.py             ← get_session, init_db, reset_database
 │   │   └── seed.py               ← 4 roles, 4 users, 6 vehicles, 5 drivers, 5 trips
@@ -113,7 +114,7 @@ TransitOps/
 │       ├── page_dashboard.py     ← 7 KPIs + recent trips + vehicle chart
 │       ├── page_fleet.py         ← Full CRUD: Add/Edit/Delete/Search/Filter vehicles
 │       ├── page_drivers.py       ← Full CRUD: Add/Edit/Delete/Search/Filter + license expiry alerts
-│       ├── page_trips.py         ← Trips table (dispatch engine in Phase 3)
+│       ├── page_trips.py         ← Full trip lifecycle: Draft→Dispatch→Complete/Cancel + Live Board
 │       ├── page_maintenance.py   ← In Shop count (workflow in Phase 4)
 │       ├── page_fuel_expenses.py ← Cost totals (logging in Phase 4)
 │       ├── page_analytics.py     ← Top metrics (full charts in Phase 5)
@@ -133,7 +134,7 @@ TransitOps/
 |-------|--------|-------|
 | **Phase 1** | ✅ **Complete** | Auth, DB (8 models), Seed, Dashboard, Dark Theme, Router, Enums, Logger |
 | **Phase 2** | ✅ **Complete** | Vehicle Registry CRUD + Driver Management CRUD + License Validation + RBAC gating |
-| Phase 3 | ⏳ Pending | Trip Dispatch Engine + Business Rule Validation |
+| **Phase 3** | ✅ **Complete** | Trip Dispatch Engine + Full Lifecycle (Draft→Dispatch→Complete/Cancel) + Live Board + 7 Business Rules |
 | Phase 4 | ⏳ Pending | Maintenance Workflow + Fuel & Expense Logging |
 | Phase 5 | ⏳ Pending | Analytics Charts + CSV Export + Editable Settings |
 
@@ -167,6 +168,84 @@ TransitOps/
 |---------|-----------|
 | `vehicle_service.py` | `list_vehicles()`, `create_vehicle()`, `update_vehicle()`, `delete_vehicle()` |
 | `driver_service.py` | `list_drivers()`, `create_driver()`, `update_driver()`, `delete_driver()` |
+
+---
+
+## Phase 3 — What's New
+
+### Trip Dispatcher (`page_trips.py`)
+Full two-tab page replacing the Phase 2 read-only stub:
+
+**Tab 1 — Trip Dispatcher**
+- **Create Draft Trip** — form with origin, destination, vehicle (all shown with capacity), available driver, cargo weight, planned distance, expected revenue; auto-generates trip code in `TR-YYYYMMDD-NNN` format
+- **Dispatch Trip** — selectbox of Draft trips with a live pre-dispatch summary card showing vehicle status, driver status, license validity (colour-coded green/red), and safety score; blocked if any rule fails
+- **Complete Trip** — selectbox of Dispatched trips; captures fuel consumed (L) and final odometer; pre-fills odometer with `current + planned_distance`
+- **Cancel Trip** — selectbox of Draft or Dispatched trips; shows contextual warning when cancelling a Dispatched trip (vehicle+driver will be restored); checkbox confirmation required
+- **Search** — case-insensitive match on trip code, origin, or destination
+- **Filter** — by status: All / Draft / Dispatched / Completed / Cancelled
+- **5-Metric KPI Row** — Total · Draft · Dispatched · Completed · Cancelled counts
+- **Colour-coded table** — Status column coloured per trip state
+- **RBAC** — all action forms visible to Dispatcher only; all other roles get view-only message
+
+**Tab 2 — Live Dispatch Board**
+- **4-column Kanban** — Draft | Dispatched | Completed | Cancelled
+- **Trip cards** — trip code (monospace), route, vehicle, driver, cargo + distance, revenue badge (green), creation timestamp
+- **Column headers** — colour-coded per status with live count badge
+- **Hover animation** — cards lift and glow orange on hover
+- **Empty state** — dashed placeholder when a column has no trips
+- **Refresh button** — instant live reload
+
+### Dispatch Engine — Business Rules
+All rules enforced in the **service layer** (`trip_service.py`), never in the UI:
+
+| Rule | Enforced In |
+|------|-------------|
+| Vehicle must be `Available` | `dispatch()` |
+| Driver must be `Available` | `dispatch()` |
+| Driver must **not** be `Suspended` | `dispatch()` |
+| Driver license must **not** be expired | `dispatch()` |
+| Cargo weight ≤ vehicle max capacity | `create_draft()` + `dispatch()` |
+| Only `Draft` trips can be dispatched | `dispatch()` |
+| Only `Dispatched` trips can be completed | `complete()` |
+| Already `Completed`/`Cancelled` trips cannot be cancelled | `cancel()` |
+
+### Status Transitions
+```
+                  ┌─────────────────────────────────────────────┐
+                  │              Trip Lifecycle                   │
+                  └─────────────────────────────────────────────┘
+
+  create_draft()        dispatch()           complete()
+  ─────────────→  Draft ─────────→ Dispatched ─────────→ Completed
+                    │                  │
+              cancel()           cancel()
+                    └──────┬───────────┘
+                           ↓
+                        Cancelled
+
+  On dispatch:  Vehicle → On Trip   │  Driver → On Trip
+  On complete:  Vehicle → Available │  Driver → Available
+  On cancel
+   (if Dispatched): Vehicle → Available │  Driver → Available
+   (if Draft):      no side-effects
+```
+
+### Service Added
+| Service | Functions |
+|---------|-----------|
+| `trip_service.py` | `list_trips()`, `get_trip()`, `create_draft()`, `dispatch()`, `complete()`, `cancel()`, `list_available_vehicles()`, `list_available_drivers()` |
+
+### CSS Added (`style.css`)
+- `.dispatch-card` — dark card with border-radius, hover lift + orange glow
+- `.dispatch-col-header` — coloured top-border column header with count badge
+- `.dispatch-card-revenue` — green revenue chip
+- `.dispatch-empty` — dashed empty-column placeholder
+
+### Git Commit
+```
+feat: trip lifecycle with dispatch validation and status automation
+```
+Branch: `nevil-phase3` → merged to `main`
 
 ---
 
