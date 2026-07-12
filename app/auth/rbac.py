@@ -17,6 +17,16 @@ AccessLevel = Literal["none", "view", "edit"]
 # Permission matrix: role_name -> module -> access_level
 # Matches the RBAC table from mockup screen 8
 PERMISSIONS: dict[str, dict[str, AccessLevel]] = {
+    "Admin": {
+        "Dashboard": "edit",
+        "Fleet": "edit",
+        "Drivers": "edit",
+        "Trips": "edit",
+        "Maintenance": "edit",
+        "Fuel & Expenses": "edit",
+        "Analytics": "edit",
+        "Settings": "edit",
+    },
     "Fleet Manager": {
         "Dashboard": "view",
         "Fleet": "edit",
@@ -55,6 +65,16 @@ PERMISSIONS: dict[str, dict[str, AccessLevel]] = {
         "Maintenance": "view",
         "Fuel & Expenses": "edit",
         "Analytics": "view",
+        "Settings": "none",
+    },
+    "Driver": {
+        "Dashboard": "view",
+        "Fleet": "none",
+        "Drivers": "none",
+        "Trips": "view",
+        "Maintenance": "none",
+        "Fuel & Expenses": "none",
+        "Analytics": "none",
         "Settings": "none",
     },
 }

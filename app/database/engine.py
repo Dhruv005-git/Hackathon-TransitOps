@@ -62,15 +62,14 @@ def reset_database() -> None:
     # Close all connections
     engine.dispose()
 
-    # Delete the database file
-    if DATABASE_PATH.exists():
-        os.remove(DATABASE_PATH)
-        log.info("Deleted database file: %s", DATABASE_PATH)
+    # Drop all tables instead of deleting the file to avoid Windows lock issues
+    Base.metadata.drop_all(bind=engine)
+    log.info("Dropped all tables")
 
     # Ensure data directory exists
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    # Recreate engine bindings (SQLite will create the file)
+    # Recreate engine bindings
     Base.metadata.create_all(bind=engine)
     log.info("All tables recreated")
 

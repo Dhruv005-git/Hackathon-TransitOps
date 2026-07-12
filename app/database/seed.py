@@ -40,12 +40,14 @@ def seed_all() -> None:
             session.flush()
             roles[role_name] = role
 
-        # --- Users (one per role) ---
+        # --- Users ---
         users_data = [
+            {"name": "System Admin", "email": "admin@transitops.com", "password": "admin123", "role": "Admin"},
             {"name": "Arjun Mehta", "email": "fleet@transitops.com", "password": "fleet123", "role": "Fleet Manager"},
             {"name": "Priya Sharma", "email": "dispatch@transitops.com", "password": "dispatch123", "role": "Dispatcher"},
             {"name": "Rahul Verma", "email": "safety@transitops.com", "password": "safety123", "role": "Safety Officer"},
             {"name": "Sneha Patel", "email": "finance@transitops.com", "password": "finance123", "role": "Financial Analyst"},
+            {"name": "Alex Driver", "email": "driver@transitops.com", "password": "driver123", "role": "Driver"},
         ]
 
         for u in users_data:
@@ -135,5 +137,47 @@ def seed_all() -> None:
             trip = Trip(**t)
             session.add(trip)
 
+        # --- Maintenance Logs ---
+        from app.models.maintenance import MaintenanceLog
+        maintenance_data = [
+            {"vehicle_id": vehicles["VAN-12"].id, "service_type": "Engine Tuning", "cost": 15000.0, "date": today, "status": "Active"},
+            {"vehicle_id": vehicles["TRUCK-04"].id, "service_type": "Tyre Replacement", "cost": 45000.0, "date": today - datetime.timedelta(days=10), "status": "Completed"},
+            {"vehicle_id": vehicles["MINI-03"].id, "service_type": "Oil Change", "cost": 3500.0, "date": today - datetime.timedelta(days=20), "status": "Completed"}
+        ]
+        
+        for m in maintenance_data:
+            session.add(MaintenanceLog(**m))
+
+        session.flush() # Flush to ensure Trips and Maintenance Logs get IDs
+
+        # --- Fuel Logs ---
+        from app.models.fuel_log import FuelLog
+        
+        trip1 = session.query(Trip).filter(Trip.trip_code=="TR001").first()
+        trip4 = session.query(Trip).filter(Trip.trip_code=="TR004").first()
+        
+        fuel_data = [
+            {"vehicle_id": vehicles["VAN-05"].id, "trip_id": trip1.id, "liters": 18.0, "cost": 1800.0, "date": today - datetime.timedelta(days=5)},
+            {"vehicle_id": vehicles["VAN-05"].id, "trip_id": trip4.id, "liters": 45.0, "cost": 4500.0, "date": today - datetime.timedelta(days=3)}
+        ]
+        
+        for f in fuel_data:
+            session.add(FuelLog(**f))
+
         session.flush()
-        log.info("Seeded: 4 roles, 4 users, 6 vehicles, 5 drivers, 5 trips")
+
+        # --- Expenses ---
+        from app.models.expense import Expense
+        expense_data = [
+            {"vehicle_id": vehicles["VAN-05"].id, "trip_id": trip1.id, "category": "Toll", "amount": 250.0, "date": today - datetime.timedelta(days=5)},
+            {"vehicle_id": vehicles["VAN-05"].id, "trip_id": trip4.id, "category": "Toll", "amount": 800.0, "date": today - datetime.timedelta(days=3)},
+            {"vehicle_id": vehicles["VAN-05"].id, "trip_id": trip4.id, "category": "Driver Allowance", "amount": 1200.0, "date": today - datetime.timedelta(days=3)},
+            {"vehicle_id": vehicles["TRUCK-8"].id, "trip_id": None, "category": "Miscellaneous", "amount": 5000.0, "date": today - datetime.timedelta(days=1)}
+        ]
+        
+        for e in expense_data:
+            session.add(Expense(**e))
+            
+        session.flush()
+        
+        log.info("Seeded: 6 roles, 6 users, 6 vehicles, 5 drivers, 5 trips, 3 maintenance logs, 2 fuel logs, 4 expenses")
