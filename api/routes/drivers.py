@@ -12,7 +12,7 @@ def get_drivers(
     status_filter: Optional[str] = None,
     current_user: dict = Depends(get_current_user)
 ):
-    return driver_service.list_drivers(search=search, status_filter=status_filter)
+    return driver_service.get_all_drivers(status_filter=status_filter, name_search=search)
 
 @router.post("/", response_model=DriverResponse)
 def create_driver(
@@ -20,15 +20,7 @@ def create_driver(
     current_user: dict = Depends(get_current_user)
 ):
     try:
-        driver = driver_service.create_driver(
-            name=driver_in.name,
-            license_no=driver_in.license_no,
-            license_category=driver_in.license_category,
-            license_expiry=driver_in.license_expiry,
-            contact_no=driver_in.contact_no,
-            safety_score=driver_in.safety_score,
-            status=driver_in.status
-        )
+        driver = driver_service.create_driver(driver_in)
         return driver
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -40,16 +32,7 @@ def update_driver(
     current_user: dict = Depends(get_current_user)
 ):
     try:
-        driver = driver_service.update_driver(
-            driver_id,
-            name=driver_in.name,
-            license_no=driver_in.license_no,
-            license_category=driver_in.license_category,
-            license_expiry=driver_in.license_expiry,
-            contact_no=driver_in.contact_no,
-            safety_score=driver_in.safety_score,
-            status=driver_in.status
-        )
+        driver = driver_service.update_driver(driver_id, driver_in)
         return driver
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

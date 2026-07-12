@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import api from '../api/client';
-import { MapPin, Play, CheckCircle, XCircle } from 'lucide-react';
+import { MapPin, Play, CheckCircle, XCircle, Truck, User, Scale, Navigation, IndianRupee, Calendar } from 'lucide-react';
+import { toast } from '../utils/ui';
 
 const Trips = () => {
   const { user } = useAuth();
@@ -34,6 +35,7 @@ const Trips = () => {
       setDrivers(resDrivers.data);
     } catch (err) {
       console.error(err);
+      toast.error('Failed to load trips data');
     }
   };
 
@@ -46,154 +48,261 @@ const Trips = () => {
     try {
       await api.post('/trips/', formData);
       setFormData({ trip_code: `TR-${Math.floor(Math.random()*10000)}`, source: '', destination: '', vehicle_id: '', driver_id: '', cargo_weight_kg: '', planned_distance_km: '', revenue: '' });
+      toast.success('Trip created successfully');
       fetchData();
     } catch (err) {
-      alert(err.response?.data?.detail || 'Error creating trip');
+      toast.error(err.response?.data?.detail || 'Error creating trip');
     }
   };
 
+  const [loadingAction, setLoadingAction] = useState(null);
+
   const handleDispatch = async (id) => {
+    setLoadingAction(`dispatch-${id}`);
     try {
       await api.post(`/trips/${id}/dispatch`);
-      fetchData();
+      toast.success('Trip dispatched');
+      await fetchData();
     } catch (err) {
-      alert(err.response?.data?.detail || 'Error dispatching trip');
+      toast.error(err.response?.data?.detail || 'Error dispatching trip');
+    } finally {
+      setLoadingAction(null);
     }
   };
 
   const handleComplete = async (e) => {
     e.preventDefault();
+    setLoadingAction(`complete-${activeTrip.id}`);
     try {
       await api.post(`/trips/${activeTrip.id}/complete`, completeData);
       setIsCompleteModalOpen(false);
-      fetchData();
+      toast.success('Trip marked as completed');
+      await fetchData();
     } catch (err) {
-      alert(err.response?.data?.detail || 'Error completing trip');
+      toast.error(err.response?.data?.detail || 'Error completing trip');
+    } finally {
+      setLoadingAction(null);
     }
   };
 
   const handleCancel = async (id) => {
-    if(window.confirm("Cancel this trip?")) {
+    if(window.confirm("Are you sure you want to cancel this trip?")) {
+      setLoadingAction(`cancel-${id}`);
       try {
         await api.post(`/trips/${id}/cancel`);
-        fetchData();
+        toast.info('Trip cancelled');
+        await fetchData();
       } catch (err) {
-        alert(err.response?.data?.detail || 'Error cancelling trip');
+        toast.error(err.response?.data?.detail || 'Error cancelling trip');
+      } finally {
+        setLoadingAction(null);
       }
     }
   };
 
-  const statusColor = (s) =>
-    s === 'Completed' ? 'var(--success)' :
-    s === 'Dispatched' ? 'var(--info)' :
-    s === 'Cancelled' ? 'var(--danger)' : 'var(--warning)';
+  const getBadgeClass = (status) => {
+    switch (status) {
+      case 'Completed': return 'badge badge-success';
+      case 'Dispatched': return 'badge badge-info';
+      case 'Cancelled': return 'badge badge-danger';
+      default: return 'badge badge-warning';
+    }
+  };
+
+  const statusColor = (status) => {
+    switch (status) {
+      case 'Completed': return 'var(--success)';
+      case 'Dispatched': return 'var(--info)';
+      case 'Cancelled': return 'var(--danger)';
+      default: return 'var(--warning)';
+    }
+  };
 
   return (
     <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2.5rem' }}>
-        <h1 style={{ margin: 0, fontSize: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <MapPin size={24} color="var(--primary)" />
+      <div className="page-header">
+        <h1 style={{ margin: 0, fontSize: '1.75rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <div style={{ background: 'var(--primary-light)', padding: '0.5rem', borderRadius: '8px', color: 'var(--primary)' }}>
+            <MapPin size={24} />
+          </div>
           {isDriver ? 'My Trips' : 'Trip Dispatching'}
         </h1>
       </div>
 
       {/* ── DRIVER VIEW: read-only card grid ── */}
       {isDriver ? (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: '1rem' }}>
-          {trips.length === 0 && <p style={{ color: 'var(--text-muted)' }}>No trips found.</p>}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: '1.5rem', marginTop: '1rem' }}>
+          {trips.length === 0 && <div className="empty-state">No trips assigned to you yet.</div>}
           {trips.map(t => (
-            <div key={t.id} className="card" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '0.75rem', borderLeft: `4px solid ${statusColor(t.status)}` }}>
+            <div key={t.id} className="card" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem', borderTop: `4px solid ${statusColor(t.status)}` }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontWeight: 700, fontSize: '1.125rem' }}>{t.trip_code}</span>
-                <span style={{ padding: '4px 12px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 600, background: statusColor(t.status), color: 'white' }}>{t.status}</span>
+                <span style={{ fontWeight: 700, fontSize: '1.25rem', color: 'var(--primary)' }}>{t.trip_code}</span>
+                <span className={getBadgeClass(t.status)}>{t.status}</span>
               </div>
-              <div style={{ fontSize: '0.9375rem' }}>
-                {t.source} <span style={{ color: 'var(--text-muted)', margin: '0 0.5rem' }}>➔</span> {t.destination}
+              
+              <div style={{ padding: '1rem', background: 'var(--background)', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.25rem', fontWeight: 600 }}>SOURCE</div>
+                  <div style={{ fontWeight: 600 }}>{t.source}</div>
+                </div>
+                <div style={{ color: 'var(--primary)', opacity: 0.5 }}>
+                  <Navigation size={20} />
+                </div>
+                <div style={{ flex: 1, textAlign: 'right' }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.25rem', fontWeight: 600 }}>DESTINATION</div>
+                  <div style={{ fontWeight: 600 }}>{t.destination}</div>
+                </div>
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', fontSize: '0.8125rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                <span>🚛 {t.vehicle?.registration_no}</span>
-                <span>👤 {t.driver?.name}</span>
-                <span>⚖️ {t.cargo_weight_kg} kg</span>
-                <span>📏 {t.planned_distance_km} km</span>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', fontSize: '0.875rem', color: 'var(--text-muted)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}><Truck size={16} color="var(--primary)"/> {t.vehicle?.registration_no}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}><User size={16} color="var(--primary)"/> {t.driver?.name}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}><Scale size={16} color="var(--primary)"/> {t.cargo_weight_kg} kg</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}><MapPin size={16} color="var(--primary)"/> {t.planned_distance_km} km</div>
               </div>
             </div>
           ))}
         </div>
-
       ) : (
-        /* ── DISPATCHER / ADMIN VIEW: split-screen ── */
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2.5rem', flex: 1 }}>
+        /* ── DISPATCHER / ADMIN / READ-ONLY VIEW ── */
+        <div style={{ display: 'grid', gridTemplateColumns: editable ? 'minmax(350px, 1fr) 1fr' : '1fr', gap: '2rem', flex: 1, alignItems: 'start' }}>
 
-          {/* Left: Create Trip Form */}
-          <div className="card" style={{ padding: '2rem' }}>
-            <h3 style={{ marginBottom: '1.5rem', fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-muted)' }}>NEW TRIP DISPATCH</h3>
-            <form onSubmit={handleCreate} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-              <div style={{ display: 'flex', gap: '1rem' }}>
-                <div style={{ flex: 1 }}><label className="form-label">SOURCE</label><input required className="form-input" value={formData.source} onChange={e => setFormData({...formData, source: e.target.value})} disabled={!editable} /></div>
-                <div style={{ flex: 1 }}><label className="form-label">DESTINATION</label><input required className="form-input" value={formData.destination} onChange={e => setFormData({...formData, destination: e.target.value})} disabled={!editable} /></div>
+          {/* Left: Create Trip Form (Only for editable roles) */}
+          {editable && (
+            <div className="card" style={{ padding: '2rem' }}>
+              <div className="section-label" style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Navigation size={18} />
+                NEW TRIP DISPATCH
               </div>
-
-              <div style={{ display: 'flex', gap: '1rem' }}>
-                <div style={{ flex: 1 }}>
-                  <label className="form-label">VEHICLE (AVAILABLE ONLY)</label>
-                  <select required className="form-input" value={formData.vehicle_id} onChange={e => setFormData({...formData, vehicle_id: Number(e.target.value)})} disabled={!editable}>
-                    <option value="">Select...</option>
-                    {vehicles.filter(v => v.status === 'Available').map(v => <option key={v.id} value={v.id}>{v.registration_no} ({v.max_capacity_kg}kg)</option>)}
-                  </select>
+              
+              <form onSubmit={handleCreate} style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                
+                {/* Route */}
+                <div style={{ display: 'flex', gap: '1rem' }}>
+                  <div style={{ flex: 1 }}>
+                    <label className="form-label">SOURCE LOCATION</label>
+                    <input required className="form-input" placeholder="e.g. Mumbai Hub" value={formData.source} onChange={e => setFormData({...formData, source: e.target.value})} disabled={!editable} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label className="form-label">DESTINATION LOCATION</label>
+                    <input required className="form-input" placeholder="e.g. Pune Depot" value={formData.destination} onChange={e => setFormData({...formData, destination: e.target.value})} disabled={!editable} />
+                  </div>
                 </div>
-                <div style={{ flex: 1 }}>
-                  <label className="form-label">DRIVER (AVAILABLE ONLY)</label>
-                  <select required className="form-input" value={formData.driver_id} onChange={e => setFormData({...formData, driver_id: Number(e.target.value)})} disabled={!editable}>
-                    <option value="">Select...</option>
-                    {drivers.filter(d => d.status === 'Available').map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
-                  </select>
-                </div>
-              </div>
 
-              <div style={{ display: 'flex', gap: '1rem' }}>
-                <div style={{ flex: 1 }}><label className="form-label">CARGO WEIGHT (KG)</label><input type="number" required className="form-input" value={formData.cargo_weight_kg} onChange={e => setFormData({...formData, cargo_weight_kg: Number(e.target.value)})} disabled={!editable} /></div>
-                <div style={{ flex: 1 }}><label className="form-label">PLANNED DISTANCE (KM)</label><input type="number" required className="form-input" value={formData.planned_distance_km} onChange={e => setFormData({...formData, planned_distance_km: Number(e.target.value)})} disabled={!editable} /></div>
-                <div style={{ flex: 1 }}><label className="form-label">EST. REVENUE (₹)</label><input type="number" required className="form-input" value={formData.revenue} onChange={e => setFormData({...formData, revenue: Number(e.target.value)})} disabled={!editable} /></div>
-              </div>
-
-              {editable && (
-                <div style={{ marginTop: '1.5rem' }}>
-                  <button type="submit" className="btn btn-primary" style={{ width: '100%', justifyContent: 'center' }}>Create Draft</button>
+                {/* Assignment */}
+                <div style={{ display: 'flex', gap: '1rem', background: 'var(--bg-base)', padding: '1rem', borderRadius: '8px' }}>
+                  <div style={{ flex: 1 }}>
+                    <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}><Truck size={14}/> VEHICLE (AVAILABLE)</label>
+                    <select required className="form-input" value={formData.vehicle_id} onChange={e => setFormData({...formData, vehicle_id: Number(e.target.value)})} disabled={!editable}>
+                      <option value="">-- Assign Vehicle --</option>
+                      {vehicles.filter(v => v.status === 'Available').map(v => <option key={v.id} value={v.id}>{v.registration_no} ({v.max_capacity_kg}kg)</option>)}
+                    </select>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}><User size={14}/> DRIVER (AVAILABLE)</label>
+                    <select required className="form-input" value={formData.driver_id} onChange={e => setFormData({...formData, driver_id: Number(e.target.value)})} disabled={!editable}>
+                      <option value="">-- Assign Driver --</option>
+                      {drivers.filter(d => d.status === 'Available').map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                    </select>
+                  </div>
                 </div>
-              )}
-            </form>
-          </div>
+
+                {/* Specs */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem' }}>
+                  <div>
+                    <label className="form-label">CARGO (KG)</label>
+                    <div style={{ position: 'relative' }}>
+                      <div style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }}><Scale size={16} /></div>
+                      <input type="number" required className="form-input" style={{ paddingLeft: '2.5rem' }} placeholder="0" value={formData.cargo_weight_kg} onChange={e => setFormData({...formData, cargo_weight_kg: Number(e.target.value)})} disabled={!editable} />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="form-label">DISTANCE (KM)</label>
+                    <div style={{ position: 'relative' }}>
+                      <div style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }}><MapPin size={16} /></div>
+                      <input type="number" required className="form-input" style={{ paddingLeft: '2.5rem' }} placeholder="0" value={formData.planned_distance_km} onChange={e => setFormData({...formData, planned_distance_km: Number(e.target.value)})} disabled={!editable} />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="form-label">REVENUE (₹)</label>
+                    <div style={{ position: 'relative' }}>
+                      <div style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }}><IndianRupee size={16} /></div>
+                      <input type="number" required className="form-input" style={{ paddingLeft: '2.5rem' }} placeholder="0" value={formData.revenue} onChange={e => setFormData({...formData, revenue: Number(e.target.value)})} disabled={!editable} />
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: '0.5rem' }}>
+                  <button type="submit" className="btn btn-primary" style={{ width: '100%', justifyContent: 'center', padding: '0.875rem', fontSize: '1rem' }} disabled={loadingAction}>
+                    {loadingAction ? 'Creating...' : 'Create & Save Draft'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
 
           {/* Right: Live Board */}
-          <div>
-            <h3 style={{ marginBottom: '1.5rem', fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-muted)' }}>LIVE BOARD (ACTIVE TRIPS)</h3>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', maxHeight: '70vh', overflowY: 'auto', paddingRight: '1rem' }}>
-              {trips.length === 0 && <p style={{ color: 'var(--text-muted)' }}>No trips found.</p>}
+          <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+            <div className="section-label" style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <Calendar size={18} />
+              LIVE BOARD
+            </div>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', flex: 1, overflowY: 'auto', maxHeight: 'calc(100vh - 220px)', paddingRight: '0.5rem', paddingBottom: '2rem' }} className="custom-scrollbar">
+              {trips.length === 0 && <div className="empty-state">No active or historical trips found.</div>}
+              
               {trips.map(t => (
-                <div key={t.id} className="card" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '0.75rem', borderLeft: `4px solid ${statusColor(t.status)}` }}>
+                <div key={t.id} className="card" style={{ 
+                  padding: '1.25rem 1.5rem', 
+                  display: 'flex', 
+                  flexDirection: 'column', 
+                  gap: '0.75rem',
+                  borderLeft: `4px solid ${statusColor(t.status)}`,
+                  transition: 'all 0.2s',
+                  cursor: 'default',
+                  flexShrink: 0
+                }}>
+                  {/* Top Row: Title, Driver, Badge */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontWeight: 700, fontSize: '1.125rem' }}>{t.trip_code}</span>
-                    <span style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>{t.vehicle?.registration_no} • {t.driver?.name}</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                      <span style={{ fontWeight: 800, fontSize: '1.125rem', letterSpacing: '0.5px' }}>{t.trip_code}</span>
+                      <span style={{ fontSize: '0.875rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <Truck size={14} /> {t.vehicle?.registration_no} &bull; <User size={14} /> {t.driver?.name}
+                      </span>
+                    </div>
+                    <span className={getBadgeClass(t.status)}>{t.status}</span>
                   </div>
-                  <div style={{ fontSize: '0.9375rem' }}>
-                    {t.source} <span style={{ color: 'var(--text-muted)', margin: '0 0.5rem' }}>➔</span> {t.destination}
+                  
+                  {/* Middle Row: Route */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.75rem', background: 'var(--bg-base)', borderRadius: '6px' }}>
+                    <div style={{ fontWeight: 600, fontSize: '0.9375rem', flex: 1, textAlign: 'right' }}>{t.source}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', color: 'var(--primary)', opacity: 0.6 }}>
+                       <div style={{ height: '2px', width: '20px', background: 'currentColor', borderRadius: '2px' }}></div>
+                       <Play size={14} fill="currentColor" />
+                    </div>
+                    <div style={{ fontWeight: 600, fontSize: '0.9375rem', flex: 1 }}>{t.destination}</div>
                   </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.5rem' }}>
-                    <span style={{ padding: '4px 12px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 600, background: statusColor(t.status), color: 'white' }}>{t.status}</span>
-                    {editable && (
-                      <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        {t.status === 'Draft' && (
-                          <>
-                            <button className="btn btn-ghost" onClick={() => handleDispatch(t.id)} style={{ padding: '0.25rem 0.75rem', color: 'var(--info)', border: '1px solid var(--info)' }}>Dispatch</button>
-                            <button className="btn btn-ghost" onClick={() => handleCancel(t.id)} style={{ padding: '0.25rem 0.75rem', color: 'var(--danger)', border: '1px solid var(--danger)' }}>Cancel</button>
-                          </>
-                        )}
-                        {t.status === 'Dispatched' && (
-                          <button className="btn btn-ghost" onClick={() => { setActiveTrip(t); setCompleteData({ fuel_consumed_l: '', final_odometer: t.vehicle?.odometer || '' }); setIsCompleteModalOpen(true); }} style={{ padding: '0.25rem 0.75rem', color: 'var(--success)', border: '1px solid var(--success)' }}>Complete</button>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                  
+                  {/* Bottom Row: Actions */}
+                  {editable && (t.status === 'Draft' || t.status === 'Dispatched') && (
+                    <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', marginTop: '0.25rem' }}>
+                      {t.status === 'Draft' && (
+                        <>
+                          <button className="btn btn-ghost" onClick={() => handleCancel(t.id)} style={{ color: 'var(--danger)' }}>
+                            <XCircle size={16} /> Cancel
+                          </button>
+                          <button className="btn" onClick={() => handleDispatch(t.id)} style={{ background: 'var(--info)', color: 'white' }}>
+                            <Navigation size={16} /> Dispatch
+                          </button>
+                        </>
+                      )}
+                      {t.status === 'Dispatched' && (
+                        <button className="btn" onClick={() => { setActiveTrip(t); setCompleteData({ fuel_consumed_l: '', final_odometer: t.vehicle?.odometer || '' }); setIsCompleteModalOpen(true); }} style={{ background: 'var(--success)', color: 'white' }}>
+                          <CheckCircle size={16} /> Mark Complete
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -204,21 +313,26 @@ const Trips = () => {
 
       {/* Complete Trip Modal */}
       {isCompleteModalOpen && (
-        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: '1rem', backdropFilter: 'blur(4px)' }}>
-          <div className="card animate-fade-in" style={{ width: '100%', maxWidth: '440px' }}>
-            <h2 style={{ marginBottom: '1.5rem', fontSize: '1.25rem' }}>Complete Trip {activeTrip?.trip_code}</h2>
+        <div className="modal-backdrop">
+          <div className="modal-box">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.5rem', color: 'var(--success)' }}>
+              <CheckCircle size={28} />
+              <h2 style={{ margin: 0, fontSize: '1.25rem', color: 'var(--text)' }}>Complete Trip {activeTrip?.trip_code}</h2>
+            </div>
+            
             <form onSubmit={handleComplete} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
               <div>
                 <label className="form-label">Fuel Consumed (Liters)</label>
-                <input type="number" step="0.1" required className="form-input" value={completeData.fuel_consumed_l} onChange={e => setCompleteData({...completeData, fuel_consumed_l: Number(e.target.value)})} />
+                <input type="number" step="0.1" required className="form-input" placeholder="e.g. 45.5" value={completeData.fuel_consumed_l} onChange={e => setCompleteData({...completeData, fuel_consumed_l: Number(e.target.value)})} autoFocus />
               </div>
               <div>
-                <label className="form-label">Final Odometer</label>
-                <input type="number" step="0.1" required className="form-input" value={completeData.final_odometer} onChange={e => setCompleteData({...completeData, final_odometer: Number(e.target.value)})} />
+                <label className="form-label">Final Odometer Reading</label>
+                <input type="number" step="0.1" required className="form-input" placeholder="e.g. 24500" value={completeData.final_odometer} onChange={e => setCompleteData({...completeData, final_odometer: Number(e.target.value)})} />
               </div>
-              <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem', justifyContent: 'flex-end' }}>
-                <button type="button" className="btn btn-ghost" onClick={() => setIsCompleteModalOpen(false)}>Cancel</button>
-                <button type="submit" className="btn btn-primary" style={{ background: 'var(--success)', color: 'white' }}>Complete Trip</button>
+              
+              <div style={{ display: 'flex', gap: '1rem', marginTop: '1.5rem', paddingTop: '1.5rem', borderTop: '1px solid var(--border)' }}>
+                <button type="button" className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }} onClick={() => setIsCompleteModalOpen(false)}>Cancel</button>
+                <button type="submit" className="btn btn-primary" style={{ flex: 1, justifyContent: 'center', background: 'var(--success)' }}>Submit & Close</button>
               </div>
             </form>
           </div>

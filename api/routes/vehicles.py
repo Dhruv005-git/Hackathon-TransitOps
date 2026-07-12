@@ -12,7 +12,7 @@ def get_vehicles(
     status_filter: Optional[str] = None,
     current_user: dict = Depends(get_current_user)
 ):
-    return vehicle_service.list_vehicles(search=search, status_filter=status_filter)
+    return vehicle_service.get_all_vehicles(type_filter=search, status_filter=status_filter)
 
 @router.post("/", response_model=VehicleResponse)
 def create_vehicle(
@@ -20,15 +20,7 @@ def create_vehicle(
     current_user: dict = Depends(get_current_user)
 ):
     try:
-        vehicle = vehicle_service.create_vehicle(
-            registration_no=vehicle_in.registration_no,
-            model_name=vehicle_in.model_name,
-            vehicle_type=vehicle_in.type,
-            max_capacity_kg=vehicle_in.max_capacity_kg,
-            odometer=vehicle_in.odometer,
-            acquisition_cost=vehicle_in.acquisition_cost,
-            status=vehicle_in.status
-        )
+        vehicle = vehicle_service.create_vehicle(vehicle_in)
         return vehicle
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -40,16 +32,7 @@ def update_vehicle(
     current_user: dict = Depends(get_current_user)
 ):
     try:
-        vehicle = vehicle_service.update_vehicle(
-            vehicle_id,
-            registration_no=vehicle_in.registration_no,
-            model_name=vehicle_in.model_name,
-            vehicle_type=vehicle_in.type,
-            max_capacity_kg=vehicle_in.max_capacity_kg,
-            odometer=vehicle_in.odometer,
-            acquisition_cost=vehicle_in.acquisition_cost,
-            status=vehicle_in.status
-        )
+        vehicle = vehicle_service.update_vehicle(vehicle_id, vehicle_in)
         return vehicle
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

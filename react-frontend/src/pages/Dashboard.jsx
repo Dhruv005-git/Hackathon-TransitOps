@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import api from '../api/client';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
-import { Activity, Truck, Wrench, MapPin, Clock, Users, TrendingUp, ChevronRight, DollarSign } from 'lucide-react';
+import { Activity, Truck, Wrench, MapPin, Clock, Users, TrendingUp, ChevronRight, IndianRupee } from 'lucide-react';
 import { StatusBadge } from '../utils/ui';
 import { useNavigate } from 'react-router-dom';
 
@@ -85,7 +85,7 @@ const Dashboard = () => {
         <KpiCard label="Pending Trips"    value={kpis.pending_trips}      icon={<Clock size={18} />}     color="var(--warning)" />
         <KpiCard label="Drivers On Duty"  value={kpis.drivers_on_duty}    icon={<Users size={18} />}     color="#8b5cf6"        />
         <KpiCard label="Fleet Util."      value={`${kpis.utilization_percent?.toFixed(1)}%`} icon={<TrendingUp size={18} />} color="var(--accent)" />
-        <KpiCard label="Total Revenue"    value={`₹${(kpis.total_revenue || 0).toLocaleString()}`} icon={<DollarSign size={18} />} color="var(--success)" />
+        <KpiCard label="Total Revenue"    value={`₹${(kpis.total_revenue || 0).toLocaleString()}`} icon={<IndianRupee size={18} />} color="var(--success)" />
       </div>
 
       {/* Bottom Row */}

@@ -32,6 +32,7 @@ const Sidebar = () => {
   return (
     <div style={{
       width: '260px',
+      flexShrink: 0,
       backgroundColor: 'var(--bg-surface)',
       borderRight: '1px solid var(--border-color)',
       display: 'flex',
