@@ -64,7 +64,7 @@ Streamlit requires pages in a root-level `pages/` folder. Our architecture uses
 `frontend/pages/` (per SDD) and needs centralized RBAC + auth — incompatible with
 Streamlit's routing. The render() pattern gives us full control with no hacks.
 
-### Adding a New Page (Phase 2+)
+### Adding a New Page (Phase 3+)
 1. Create `frontend/pages/page_newfeature.py` with a `render()` function
 2. Add one line to `PAGE_MAP` in `frontend/router.py`
 3. Add the RBAC entry in `app/auth/rbac.py`
@@ -93,11 +93,13 @@ TransitOps/
 │   │   ├── hashing.py            ← bcrypt hash_password / verify_password
 │   │   └── rbac.py               ← 4-role × 8-module permission matrix
 │   ├── services/
-│   │   └── auth_service.py       ← login(), logout(), get_current_user()
+│   │   ├── auth_service.py       ← login(), logout(), get_current_user()
+│   │   ├── vehicle_service.py    ← create(), update(), delete(), list() + search/filter
+│   │   └── driver_service.py     ← create(), update(), delete(), list() + license validation
 │   ├── database/
 │   │   ├── engine.py             ← get_session, init_db, reset_database
 │   │   └── seed.py               ← 4 roles, 4 users, 6 vehicles, 5 drivers, 5 trips
-│   └── utils/, schemas/          ← Populated in Phase 2+
+│   └── utils/, schemas/          ← Populated in Phase 3+
 │
 ├── frontend/
 │   ├── router.py                 ← PAGE_MAP + route_to_page() dispatcher
@@ -109,17 +111,17 @@ TransitOps/
 │   │   └── status_badge.py       ← render_status_badge(status) → HTML
 │   └── pages/                    ← Each file: render() function only
 │       ├── page_dashboard.py     ← 7 KPIs + recent trips + vehicle chart
-│       ├── page_fleet.py         ← Vehicle table preview (CRUD in Phase 2)
-│       ├── page_drivers.py       ← Driver table + license check (CRUD in Phase 2)
+│       ├── page_fleet.py         ← Full CRUD: Add/Edit/Delete/Search/Filter vehicles
+│       ├── page_drivers.py       ← Full CRUD: Add/Edit/Delete/Search/Filter + license expiry alerts
 │       ├── page_trips.py         ← Trips table (dispatch engine in Phase 3)
 │       ├── page_maintenance.py   ← In Shop count (workflow in Phase 4)
 │       ├── page_fuel_expenses.py ← Cost totals (logging in Phase 4)
 │       ├── page_analytics.py     ← Top metrics (full charts in Phase 5)
 │       └── page_settings.py      ← RBAC matrix read-only (editable in Phase 5)
 │
-├── tests/                        ← Unit tests (Phase 2+)
+├── tests/                        ← Unit tests (Phase 3+)
 ├── docs/
-│   └── phase1_report.html        ← Full Phase 1 technical report
+│   └── TransitOps_Phase1_Report.pdf  ← Full Phase 1 technical report
 └── data/transitops.db            ← Auto-created on first run
 ```
 
@@ -130,13 +132,45 @@ TransitOps/
 | Phase | Status | Scope |
 |-------|--------|-------|
 | **Phase 1** | ✅ **Complete** | Auth, DB (8 models), Seed, Dashboard, Dark Theme, Router, Enums, Logger |
-| Phase 2 | ⏳ Pending | Vehicle Registry CRUD + Driver Management CRUD |
+| **Phase 2** | ✅ **Complete** | Vehicle Registry CRUD + Driver Management CRUD + License Validation + RBAC gating |
 | Phase 3 | ⏳ Pending | Trip Dispatch Engine + Business Rule Validation |
 | Phase 4 | ⏳ Pending | Maintenance Workflow + Fuel & Expense Logging |
 | Phase 5 | ⏳ Pending | Analytics Charts + CSV Export + Editable Settings |
 
 ---
 
+## Phase 2 — What's New
+
+### Vehicle Registry (`page_fleet.py`)
+- **Add Vehicle** — form with registration no, model, type, capacity, odometer, cost, status
+- **Edit Vehicle** — inline form pre-filled with existing data
+- **Delete Vehicle** — confirmation checkbox required before deletion
+- **Search** — case-insensitive match on registration no or model name
+- **Filter** — by status: Available / On Trip / In Shop / Retired
+- **Summary Metrics** — total, available, on-trip, in-shop counts
+- **Unique Reg No Validation** — duplicate registration rejected with friendly error
+- **RBAC** — edit forms only visible to Fleet Manager; all other roles get view-only
+
+### Driver Management (`page_drivers.py`)
+- **Add Driver** — form with name, license no, category (LMV/HMV), expiry, contact, safety score, status
+- **Edit Driver** — inline form pre-filled with existing data
+- **Delete Driver** — confirmation checkbox required
+- **Search** — case-insensitive match on name or license no
+- **Filter** — by status: Available / On Trip / Off Duty / Suspended
+- **Summary Metrics** — total, available, on-trip, suspended, expiring soon (≤30 days), expired
+- **License Validation** — cannot add a driver with an already-expired license
+- **Unique License No Validation** — duplicate license rejected with friendly error
+- **RBAC** — edit forms visible to Fleet Manager and Safety Officer; others get view-only
+
+### Services Added
+| Service | Functions |
+|---------|-----------|
+| `vehicle_service.py` | `list_vehicles()`, `create_vehicle()`, `update_vehicle()`, `delete_vehicle()` |
+| `driver_service.py` | `list_drivers()`, `create_driver()`, `update_driver()`, `delete_driver()` |
+
+---
+
 ## Documentation
 
 Full Phase 1 technical report (architecture decisions, bugs fixed, features):
+`docs/TransitOps_Phase1_Report.pdf`
