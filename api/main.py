@@ -3,10 +3,23 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import auth, vehicles, drivers, trips, maintenance, analytics, fuel_logs, expenses
 
+from contextlib import asynccontextmanager
+
+from app.database.engine import init_db
+from app.database.seed import seed_db
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize DB tables and seed initial data on startup
+    init_db()
+    seed_db()
+    yield
+
 app = FastAPI(
     title="TransitOps API",
     description="Backend API for the TransitOps React Application",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Configure CORS for React frontend (which typically runs on port 5173 for Vite)
